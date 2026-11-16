@@ -1,0 +1,103 @@
+name: Build desktop releases
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+            platform: windows-x86_64
+          - os: ubuntu-22.04
+            python-version: "3.12"
+            platform: linux-x86_64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install application and build tools
+        run: python -m pip install ".[build]"
+
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        run: >-
+          pyinstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name FileMind
+          --paths src
+          --collect-all pymupdf
+          --specpath build\pyinstaller
+          --workpath build\pyinstaller\work
+          --distpath dist
+          src\filemind\gui\app.py
+
+      - name: Build Linux executable
+        if: runner.os == 'Linux'
+        run: >-
+          pyinstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name FileMind
+          --paths src
+          --collect-all pymupdf
+          --specpath build/pyinstaller
+          --workpath build/pyinstaller/work
+          --distpath dist
+          src/filemind/gui/app.py
+
+      - name: Stage Windows executable
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist\FileMind.exe release\FileMind-windows-x86_64.exe
+
+      - name: Stage Linux executable
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p release
+          cp dist/FileMind release/FileMind-linux-x86_64
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileMind-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform executables
+        uses: actions/download-artifact@v4
+        with:
+          pattern: FileMind-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish executables to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: release/*
+          fail_on_unmatched_files: true
