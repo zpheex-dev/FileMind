@@ -28,6 +28,7 @@ categorized as **Other** with a low score and an explanation.
 ## Requirements
 
 - Windows 10 or later (primary development platform)
+- Linux x86_64 desktop (packaged executable targets Ubuntu 22.04 or compatible)
 - Python 3.11 or later
 
 ## Install for development
@@ -44,6 +45,14 @@ python -m pip install -r requirements-dev.txt
 The `requirements.txt` file contains runtime dependencies. The development
 requirements also install pytest.
 
+On Linux, create a virtual environment and install the same requirements:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
 ## Run FileMind
 
 Start the desktop application:
@@ -51,6 +60,13 @@ Start the desktop application:
 ```powershell
 filemind
 ```
+
+You can also double-click `run_filemind.bat` from the project folder. It uses
+the project's `.venv` when available, otherwise it uses the Python launcher or
+`python` on your PATH. Install the project dependencies first.
+
+On Linux, run `bash run_filemind.sh`. It uses `.venv` when available, otherwise
+it uses `python3` on your PATH. Install the project dependencies first.
 
 The scanner is also available as a command:
 
@@ -64,6 +80,38 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 **Find duplicates** to check exact content matches. A new successful scan
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
+
+## Standalone executables
+
+To build a standalone executable for the current operating system, install the
+packaging extra and run PyInstaller from the project folder. PyInstaller builds
+for the operating system where it runs; it does not cross-compile.
+
+```powershell
+python -m pip install ".[build]"
+pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build\pyinstaller --workpath build\pyinstaller\work --distpath dist src\filemind\gui\app.py
+```
+
+On Linux, use the same command with Linux-style paths:
+
+```bash
+python -m pip install ".[build]"
+pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build/pyinstaller --workpath build/pyinstaller/work --distpath dist src/filemind/gui/app.py
+```
+
+The Windows output is `dist\FileMind.exe`; the Linux output is `dist/FileMind`.
+The Linux release is named `FileMind-linux-x86_64`. Make it executable, then
+run it:
+
+```bash
+chmod +x FileMind-linux-x86_64
+./FileMind-linux-x86_64
+```
+
+The Linux release is built on Ubuntu 22.04 for x86_64 and requires glibc 2.35 or
+later plus the system libraries required by Qt. To create a GitHub Release with
+both platform builds, push a version tag such as `v0.1.0`. Published downloads
+will appear on the [Releases page](https://github.com/zpheex-dev/FileMind-vibecoded/releases).
 
 ## Run tests
 
