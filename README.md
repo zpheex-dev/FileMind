@@ -22,13 +22,18 @@ cyan accents, sortable file columns, category filters, and a resizable inspector
 The PySide6 desktop shell can recursively scan a selected directory in a background
 thread, report progress, and cancel a scan. My Files displays file names, types,
 sizes and modification times. Supported text previews load in a background
-thread when a file is selected.
+thread when a file is selected. Cached previews are revalidated against size and
+nanosecond modification time on reselection; missing or unreadable files show errors.
 Transparent extension-based classification with explanations is also available.
 The Duplicate Finder uses local SHA-256 hashing to report exact duplicates from
 the latest scan. It hashes only same-size candidates, runs in a background
-thread, and can be cancelled. It never deletes or changes files.
-Machine-learning classification, recommendations, database-backed history, and
-safe move/undo workflows have not been implemented.
+thread, and can be cancelled. Recoverable-byte estimates count distinct filesystem
+identities, so hard links do not inflate storage savings. All matching paths remain
+visible. It never deletes or changes files.
+The Organizer page now shows read-only Proposed Organization suggestions from
+the latest completed scan, including explanations and destination conflicts.
+Machine-learning classification, database-backed history, and safe move/undo
+workflows have not been implemented.
 
 Scanning and analysis are read-only. Directory scans collect metadata without
 extracting every document. The file inventory uses a virtual table model,
@@ -96,6 +101,15 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 **Find duplicates** to check exact content matches. A new successful scan
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
+
+Open **AI Organizer** to review **Proposed Organization**. Each file is proposed
+for an Organized folder inside the scanned root, then a category folder, retaining
+its filename (for example, Organized/Documents/report.pdf).
+Files already at their destination are omitted. Existing destinations and multiple
+files targeting the same destination are flagged. Unknown extensions go to **Other**.
+A completed scan replaces the plan, including an empty scan; cancelled or failed
+scans retain the previous plan. Conflicts are a snapshot: rescan to refresh them.
+Generating a plan never creates folders, moves, overwrites, or deletes files.
 
 ## Standalone executables
 

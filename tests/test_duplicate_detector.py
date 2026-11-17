@@ -194,3 +194,24 @@ def test_duplicate_check_can_be_cancelled_before_hashing(
     assert result.cancelled
     assert not result.groups
     assert result.files_hashed == 0
+
+
+def test_hard_links_count_storage_once_but_preserve_paths(tmp_path):
+    import os
+    import pytest
+
+    first = tmp_path / "first.txt"
+    link = tmp_path / "link.txt"
+    copy = tmp_path / "copy.txt"
+    first.write_bytes(b"same content")
+    try:
+        os.link(first, link)
+    except OSError as error:
+        pytest.skip(f"Hard links unavailable: {error}")
+    result = find_duplicates([analyze_file(p) for p in (first, link)])
+    assert set(result.groups[0].files) == {first, link}
+    assert result.groups[0].redundant_bytes == 0
+    copy.write_bytes(first.read_bytes())
+    result = find_duplicates([analyze_file(p) for p in (first, link, copy)])
+    assert set(result.groups[0].files) == {first, link, copy}
+    assert result.groups[0].redundant_bytes == len(b"same content")

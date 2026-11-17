@@ -2,9 +2,11 @@
 
 from collections.abc import Callable
 from collections import Counter
+import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSortFilterProxyModel, QTimer
+from PySide6.QtCore import Qt, Signal, QSortFilterProxyModel, QTimer, QRectF, QEvent
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -13,6 +15,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -22,10 +26,12 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTreeWidget,
     QTreeWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
+from filemind.organizer.planner import propose_organization
 from filemind.gui.file_model import FileTableModel
 from filemind.gui.workers import PreviewWorker
 
@@ -40,6 +46,94 @@ from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
 
 
+CATEGORY_COLORS = (
+    "#53dfcd", "#79aaff", "#f4ba70", "#d69cf0", "#e88698",
+    "#9bcf84", "#eed779", "#76c6dc", "#b6a5a0", "#bdc9d5",
+)
+
+
+class CategoryChart(QWidget):
+    """A circular overview by file count, with an accessible text summary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._counts = {}
+        self.setMinimumHeight(190)
+        self.setAccessibleName("Category distribution by number of files")
+        self.setAccessibleDescription("No scan results yet.")
+
+    def set_counts(self, counts) -> None:
+        self._counts = dict(counts)
+        total = sum(self._counts.values())
+        self.setAccessibleDescription(
+            ", ".join(f"{name}: {count} files, {count / total:.0%}"
+                      for name, count in self._counts.items())
+            if total else "No files in the latest scan."
+        )
+        self.update()
+
+    def _chart_rect(self):
+        size = min(self.width() - 24, self.height() - 24, 180)
+        rect = QRectF((self.width() - size) / 2, (self.height() - size) / 2, size, size)
+        rect.adjust(13, 13, -13, -13)
+        return rect
+
+    def _category_at(self, point):
+        rect = self._chart_rect()
+        dx = point.x() - rect.center().x()
+        dy = point.y() - rect.center().y()
+        radius = rect.width() / 2
+        if not radius - 9 <= math.hypot(dx, dy) <= radius + 9:
+            return None
+        total = sum(self._counts.values())
+        if not total:
+            return None
+        angle = ((math.degrees(math.atan2(dx, -dy)) + 360) % 360) * 16
+        used = 0
+        items = list(self._counts.items())
+        for index, (name, count) in enumerate(items):
+            span = 360 * 16 - used if index == len(items) - 1 else round(count * 360 * 16 / total)
+            if used <= angle < used + span:
+                return name, count, total
+            used += span
+        return None
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            category = self._category_at(event.pos())
+            if category is None:
+                QToolTip.hideText()
+                event.ignore()
+            else:
+                name, count, total = category
+                QToolTip.showText(event.globalPos(),
+                                  f"{name}: {count:,} files ({count / total:.0%})", self)
+            return True
+        return super().event(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self._chart_rect()
+        pen = QPen(QColor("#293743"), 18)
+        painter.setPen(pen)
+        painter.drawEllipse(rect)
+        total = sum(self._counts.values())
+        if total:
+            start = 90 * 16
+            used = 0
+            items = list(self._counts.items())
+            for index, (_, count) in enumerate(items):
+                span = 360 * 16 - used if index == len(items) - 1 else round(count * 360 * 16 / total)
+                pen.setColor(QColor(CATEGORY_COLORS[index % len(CATEGORY_COLORS)]))
+                painter.setPen(pen)
+                painter.drawArc(rect, start - used, -span)
+                used += span
+        painter.setPen(QColor("#e3edf7"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                         f"{total:,}\nfiles" if total else "No files")
+
+
 class DashboardPage(QWidget):
     scan_requested = Signal()
 
@@ -52,6 +146,7 @@ class DashboardPage(QWidget):
         layout.addWidget(self._build_welcome_card())
         layout.addLayout(self._build_metrics())
         layout.addLayout(self._build_overview_cards())
+        layout.addWidget(self._build_distribution_details())
         layout.addStretch(1)
 
     def _build_welcome_card(self) -> QFrame:
@@ -121,16 +216,29 @@ class DashboardPage(QWidget):
             "Category distribution",
             "Extension rules · local processing",
         )
-        self._distribution_layout = QVBoxLayout()
-        self._distribution_empty = QLabel("Scan a folder to reveal its file composition.")
-        self._distribution_empty.setObjectName("MutedText")
-        self._distribution_layout.addWidget(self._distribution_empty)
-        activity_card.content_layout.addLayout(self._distribution_layout)
-        activity_card.content_layout.addStretch(1)
+        self._category_chart = CategoryChart()
+        activity_card.content_layout.addWidget(self._category_chart)
+        self._chart_caption = QLabel("File count by category")
+        self._chart_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._chart_caption.setObjectName("MutedText")
+        activity_card.content_layout.addWidget(self._chart_caption)
 
         layout.addWidget(scan_card, 1)
         layout.addWidget(activity_card, 1)
         return layout
+
+    def _build_distribution_details(self):
+        card = SurfaceCard()
+        add_card_heading(
+            card.content_layout, "Category details",
+            "File count, share of files, total known size, and file types in the latest scan.",
+        )
+        self._distribution_layout = QVBoxLayout()
+        self._distribution_empty = QLabel("Scan a folder to see category details.")
+        self._distribution_empty.setObjectName("MutedText")
+        self._distribution_layout.addWidget(self._distribution_empty)
+        card.content_layout.addLayout(self._distribution_layout)
+        return card
 
     def set_scan_running(self, directory: Path) -> None:
         self._scan_button.setEnabled(False)
@@ -183,22 +291,32 @@ class DashboardPage(QWidget):
             entry = self._distribution_layout.takeAt(0)
             if entry.widget():
                 entry.widget().deleteLater()
-        for category, count in category_counts.most_common():
+        self._category_chart.set_counts(category_counts.most_common())
+        if not files:
+            empty = QLabel("No files found in the latest scan.")
+            empty.setObjectName("MutedText")
+            self._distribution_layout.addWidget(empty)
+        for index, (category, count) in enumerate(category_counts.most_common()):
+            items = [item for item in files if item.classification.category == category]
+            sizes = [item.metadata.size_bytes for item in items if item.metadata.size_bytes is not None]
+            extensions = Counter(item.metadata.extension or "(no extension)" for item in items)
+            types = ", ".join(f"{ext} ({number})" for ext, number in extensions.most_common())
             row = QWidget()
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 4, 0, 4)
+            row_layout.setContentsMargins(0, 6, 0, 6)
             label = QLabel(category)
-            label.setMinimumWidth(90)
-            bar = QProgressBar()
-            bar.setRange(0, len(files))
-            bar.setValue(count)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(5)
-            count_label = QLabel(f"{count:,}  /  {count / len(files):.0%}")
-            count_label.setMinimumWidth(72)
+            label.setMinimumWidth(100)
+            label.setStyleSheet(f"color: {CATEGORY_COLORS[index % len(CATEGORY_COLORS)]}; font-weight: 600;")
+            info = QLabel(
+                f"{count:,} files  ·  {count / len(files):.0%}  ·  "
+                f"{_format_size(sum(sizes))} known"
+                + (f" ({len(sizes)}/{count} sizes available)" if len(sizes) != count else "")
+                + f"  ·  {types}"
+            )
+            info.setWordWrap(True)
+            info.setToolTip(types)
             row_layout.addWidget(label)
-            row_layout.addWidget(bar, 1)
-            row_layout.addWidget(count_label)
+            row_layout.addWidget(info, 1)
             self._distribution_layout.addWidget(row)
         self._metric_cards[3].set_value(
             str(len(category_counts)),
@@ -351,6 +469,7 @@ class MyFilesPage(QWidget):
         _column: int,
         _previous_row: int,
         _previous_column: int,
+        preview_metadata=None,
     ) -> None:
         if not 0 <= row < self._proxy.rowCount():
             self._preview.clear()
@@ -360,15 +479,12 @@ class MyFilesPage(QWidget):
         classified_file = self._model.files[source_row]
         metadata = classified_file.metadata
         classification = classified_file.classification
-        if metadata.content_status == "pending":
-            cached = self._preview_cache.get(metadata.path)
-            if cached is not None:
-                metadata = cached
-            else:
-                self._preview.setPlainText(f"{metadata.name}\n\nLoading local preview...")
-                self._pending_preview = metadata.path
-                self._start_preview()
-                return
+        if preview_metadata is None:
+            self._preview.setPlainText(f"{metadata.name}\n\nLoading local preview...")
+            self._pending_preview = metadata.path
+            self._start_preview()
+            return
+        metadata = preview_metadata
         if metadata.content_status == "extracted":
             text = metadata.extracted_text or "No text content found."
             if metadata.content_truncated:
@@ -394,9 +510,7 @@ class MyFilesPage(QWidget):
             return
         path = self._pending_preview
         self._pending_preview = None
-        if path in self._preview_cache:
-            return
-        worker = PreviewWorker(path)
+        worker = PreviewWorker(path, self._preview_cache.pop(path, None))
         worker.generation = self._generation
         self._preview_worker = worker
         worker.completed.connect(self._preview_completed)
@@ -415,10 +529,10 @@ class MyFilesPage(QWidget):
         if current.isValid():
             source = self._proxy.mapToSource(current)
             selected = self._model.files[source.row()].metadata.path
-            if metadata is None:
+            if metadata is None and selected == self._preview_worker.path:
                 self._preview.setPlainText("Preview could not be loaded.")
-            elif selected == metadata.path:
-                self._display_selected_file(current.row(), 0, -1, -1)
+            elif metadata is not None and selected == metadata.path:
+                self._display_selected_file(current.row(), 0, -1, -1, metadata)
 
     def _preview_finished(self):
         worker = self._preview_worker
@@ -465,52 +579,92 @@ class OrganizerPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 24)
         layout.setSpacing(18)
-        layout.addLayout(self._build_steps())
-
-        plan_card = SurfaceCard()
-        row = QHBoxLayout()
+        card = SurfaceCard()
         add_card_heading(
-            plan_card.content_layout,
-            "Organization plan",
-            "Recommendations will include a destination and an explanation for each file.",
+            card.content_layout,
+            "Proposed Organization",
+            "Suggestions place files in an Organized folder inside the scanned folder. This preview makes no changes to your files.",
         )
-        row.addStretch(1)
-        add_status_row(row, "SCAN REQUIRED", muted=True)
-        plan_card.content_layout.addLayout(row)
-        plan_card.content_layout.addWidget(
-            EmptyState(
-                "No plan to review",
-                "Scan a folder first. FileMind will present proposed moves for your approval and will not overwrite existing files.",
-                icon="✦",
-            )
-        )
-        layout.addWidget(plan_card)
-        layout.addStretch(1)
+        self._summary = QLabel("Scan a folder to generate a plan.")
+        self._summary.setWordWrap(True)
+        card.content_layout.addWidget(self._summary)
+        controls = QHBoxLayout()
+        self._folder_button = QPushButton("Customize category folder")
+        self._folder_button.setEnabled(False)
+        self._folder_button.clicked.connect(self._customize_folder)
+        controls.addWidget(self._folder_button)
+        controls.addStretch(1)
+        card.content_layout.addLayout(controls)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Current path", "Proposed destination", "Reason", "Conflict status"])
+        self._tree.setRootIsDecorated(False)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column in range(4):
+            self._tree.setColumnWidth(column, 240)
+        card.content_layout.addWidget(self._tree)
+        layout.addWidget(card)
+        self._proposals = ()
+        self._folder_names = {}
+        self._directory = None
+        self._files = []
 
-    @staticmethod
-    def _build_steps() -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(12)
-        steps = (
-            ("01", "Scan", "Read file information"),
-            ("02", "Review", "Inspect proposed destinations"),
-            ("03", "Confirm", "Approve selected moves"),
+    def _customize_folder(self):
+        categories = sorted({item.classification.category for item in self._files})
+        category, accepted = QInputDialog.getItem(
+            self, "Category folder", "Choose a category:", categories, 0, False
         )
-        for number, title, description in steps:
-            card = SurfaceCard()
-            card.content_layout.setSpacing(6)
-            number_label = QLabel(number)
-            number_label.setObjectName("MutedText")
-            title_label = QLabel(title)
-            title_label.setObjectName("CardTitle")
-            detail_label = QLabel(description)
-            detail_label.setObjectName("MutedText")
-            detail_label.setWordWrap(True)
-            card.content_layout.addWidget(number_label)
-            card.content_layout.addWidget(title_label)
-            card.content_layout.addWidget(detail_label)
-            layout.addWidget(card, 1)
-        return layout
+        if not accepted:
+            return
+        folder, accepted = QInputDialog.getText(
+            self, "Category folder", "Folder name inside Organized:",
+            text=self._folder_names.get(category, category),
+        )
+        if not accepted:
+            return
+        updated = dict(self._folder_names)
+        updated[category] = folder
+        try:
+            propose_organization(self._directory, self._files, updated)
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid folder name", str(error))
+            return
+        self._folder_names = updated
+        self.set_scan_result(self._directory, self._files)
+
+    def selected_proposals(self):
+        return tuple(
+            proposal for index, proposal in enumerate(self._proposals)
+            if self._tree.topLevelItem(index).checkState(0) == Qt.CheckState.Checked
+            and not proposal.has_conflict
+        )
+
+    def set_scan_result(self, directory: Path, files: list[ClassifiedFile]) -> None:
+        # Replace the entire snapshot, including when the new scan is empty.
+        self._directory, self._files = directory, files
+        self._folder_button.setEnabled(bool(files))
+        self._tree.clear()
+        self._proposals = ()
+        self._proposals = propose_organization(directory, files, self._folder_names)
+        for proposal in self._proposals:
+            row = QTreeWidgetItem([
+                str(proposal.current_path),
+                str(proposal.destination),
+                proposal.reason,
+                "; ".join(proposal.conflicts) or "No conflict detected",
+            ])
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.CheckState.Unchecked if proposal.has_conflict else Qt.CheckState.Checked)
+            for column in range(4):
+                row.setToolTip(column, row.text(column))
+            self._tree.addTopLevelItem(row)
+        conflicts = sum(proposal.has_conflict for proposal in self._proposals)
+        self._summary.setText(
+            f"{len(self._proposals):,} proposed moves · {conflicts:,} with conflicts. "
+            "Preview only — no files or folders have been changed."
+        )
+        self._summary.setToolTip(str(directory))
 
 
 class DuplicateFinderPage(QWidget):
