@@ -77,6 +77,7 @@ def find_duplicates(
     ]
     total_bytes = sum(metadata.size_bytes or 0 for metadata in candidates)
     hashes: dict[tuple[int, str], list[FileMetadata]] = defaultdict(list)
+    identities: dict[Path, tuple[int, int]] = {}
     bytes_hashed = 0
     last_progress_bytes = 0
     files_hashed = 0
@@ -140,6 +141,7 @@ def find_duplicates(
             if (
                 before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns
+                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
             ):
                 issues.append(
                     DuplicateIssue(
@@ -153,6 +155,7 @@ def find_duplicates(
         else:
             size_bytes = metadata.size_bytes
             if size_bytes is not None:
+                identities[metadata.path] = (after.st_dev, after.st_ino)
                 hashes[(size_bytes, digest.hexdigest())].append(metadata)
                 files_hashed += 1
         finally:
@@ -176,7 +179,7 @@ def find_duplicates(
                 sha256=checksum,
                 files=tuple(item.path for item in matching_files),
                 size_bytes=size_bytes,
-                redundant_bytes=size_bytes * (len(matching_files) - 1),
+                redundant_bytes=size_bytes * (len({identities[item.path] for item in matching_files}) - 1),
             )
         )
 

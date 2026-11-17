@@ -261,3 +261,148 @@ def test_scan_worker_reports_filesystem_errors(tmp_path: Path) -> None:
     assert failures.count() == 1
     assert failures.at(0)[0] == directory
     assert "Directory not found" in failures.at(0)[1]
+
+
+@pytest.mark.parametrize("change", ["size", "mtime", "missing", "unreadable"])
+def test_preview_refreshes_after_external_change(application, tmp_path, monkeypatch, change):
+    original = tmp_path / "a.txt"
+    other = tmp_path / "b.txt"
+    original.write_text("old content")
+    other.write_text("other")
+    files = []
+    for path in (original, other):
+        metadata = analyze_file(path, extract_content=False)
+        files.append(ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata)))
+    window = MainWindow()
+    page = window._pages["My Files"]
+
+    def drain():
+        for _ in range(5):
+            if page._preview_worker is not None:
+                _wait_for_worker(application, page._preview_worker)
+
+    try:
+        page.set_scan_result(tmp_path, files)
+        drain()
+        assert "old content" in page._preview.toPlainText()
+        old_stat = original.stat()
+        if change == "size":
+            original.write_text("updated longer content")
+            os.utime(original, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        elif change == "mtime":
+            original.write_text("new content")
+            os.utime(original, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000))
+        elif change == "missing":
+            original.unlink()
+        else:
+            real_open = Path.open
+            def denied(path, *args, **kwargs):
+                if path == original:
+                    raise PermissionError("Access denied")
+                return real_open(path, *args, **kwargs)
+            monkeypatch.setattr(Path, "open", denied)
+        page._table.setCurrentIndex(page._proxy.index(1, 0))
+        drain()
+        page._table.setCurrentIndex(page._proxy.index(0, 0))
+        drain()
+        text = page._preview.toPlainText()
+        assert "old content" not in text
+        assert {"size": "updated longer content", "mtime": "new content",
+                "missing": "Could not read", "unreadable": "Could not read"}[change] in text
+    finally:
+        window.close()
+
+
+def test_organizer_replaces_plan_after_completed_scan(application, tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "report.txt").write_text("report")
+    window = MainWindow()
+    try:
+        page = window._pages["AI Organizer"]
+        window._start_scan(first)
+        _wait_for_worker(application, window._scan_worker)
+        assert page._tree.topLevelItemCount() == 1
+        row = page._tree.topLevelItem(0)
+        assert row.text(0) == str(first / "report.txt")
+        assert row.text(1) == str(first / "Organized" / "Documents" / "report.txt")
+        assert row.text(3) == "No conflict detected"
+        assert not (first / "Organized").exists()
+        window._start_scan(second)
+        _wait_for_worker(application, window._scan_worker)
+        assert page._tree.topLevelItemCount() == 0
+        assert page._proposals == ()
+    finally:
+        window.close()
+
+
+def test_dashboard_distribution_details_refresh(application, tmp_path):
+    from dataclasses import replace
+
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    code = tmp_path / "script.py"
+    first.write_text("abc")
+    second.write_text("longer")
+    code.write_text("pass")
+    classifier = RuleBasedClassifier()
+    files = []
+    for path in (first, second, code):
+        metadata = analyze_file(path, extract_content=False)
+        if path == second:
+            metadata = replace(metadata, size_bytes=None)
+        files.append(ClassifiedFile(metadata, classifier.classify(metadata)))
+    dashboard = DashboardPage()
+    dashboard.set_scan_result(tmp_path, files, 0)
+    assert dashboard._category_chart._counts == {"Documents": 2, "Code": 1}
+    documents = dashboard._distribution_layout.itemAt(0).widget()
+    details = documents.layout().itemAt(1).widget().text()
+    assert "2 files" in details
+    assert "67%" in details
+    assert "1/2 sizes available" in details
+    assert ".txt (2)" in details
+    dashboard.set_scan_result(tmp_path, [], 0)
+    assert dashboard._category_chart._counts == {}
+    assert "No files found" in dashboard._distribution_layout.itemAt(0).widget().text()
+
+
+def test_category_chart_tooltip_identifies_hovered_segment(application, monkeypatch):
+    from PySide6.QtCore import QPoint, QEvent
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QToolTip
+    from filemind.gui.pages import CategoryChart
+
+    chart = CategoryChart()
+    chart.resize(200, 200)
+    chart.set_counts([("Documents", 3), ("Images", 1)])
+    messages = []
+    monkeypatch.setattr(QToolTip, "showText", lambda position, text, widget: messages.append(text))
+    # The ring begins at the top and proceeds clockwise.
+    for point in (QPoint(177, 100), QPoint(23, 100)):
+        QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, point, point))
+    assert messages == ["Documents: 3 files (75%)", "Images: 1 files (25%)"]
+    QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, QPoint(100, 100), QPoint(100, 100)))
+    assert len(messages) == 2
+    chart.set_counts([])
+    QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, QPoint(177, 100), QPoint(177, 100)))
+    assert len(messages) == 2
+
+
+def test_organizer_selection_and_custom_folder(application, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    path = tmp_path / "report.txt"
+    path.write_text("report")
+    metadata = analyze_file(path, extract_content=False)
+    page = MainWindow()._pages["AI Organizer"]
+    page.set_scan_result(tmp_path, [ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata))])
+    assert len(page.selected_proposals()) == 1
+    page._tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
+    assert not page.selected_proposals()
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("Documents", True))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Paperwork", True))
+    page._customize_folder()
+    assert page._proposals[0].destination == tmp_path / "Organized" / "Paperwork" / "report.txt"
+    assert not (tmp_path / "Organized").exists()

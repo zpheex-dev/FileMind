@@ -20,7 +20,7 @@
 | `src/filemind/scanner/` | Discover files and collect filesystem paths | Recursively scans without following symlinks; reports progress, cancellation, and per-directory errors |
 | `src/filemind/analyzer/metadata.py` | Extract filesystem metadata and supported text | Reads timestamps/size, optionally extracting bounded TXT, Markdown, Python, CSV, JSON, LOG, and PDF content |
 | `src/filemind/categorizer/classifier.py` | Categorize files behind a replaceable interface | Extension-based rules return a category, heuristic score, method, and explanation |
-| `src/filemind/organizer/` | Build and execute safe organization plans | Placeholder |
+| `src/filemind/organizer/` | Generate read-only organization plans | Immutable proposals with disk and plan conflict checks; no execution |
 | `src/filemind/database/` | Persist scan and operation history | Placeholder |
 | `src/filemind/gui/app.py` | Start the PySide6 desktop application | Creates the application and applies the shared theme |
 | `src/filemind/gui/window.py` | Persistent navigation and page switching | Connects folder selection, progress, cancellation, and results |
@@ -32,6 +32,9 @@
 The scanner returns a `ScanResult` containing discovered `pathlib.Path` objects,
 per-directory issues, and cancellation status. It never changes file contents.
 GUI scans request metadata only; the inspector caches at most eight on-demand text previews.
+On selection, PreviewWorker checks cached size and nanosecond modification time
+and verifies read access before reuse. Changed files are extracted again; errors
+are retried on the next selection. These checks run outside the GUI thread.
 The file inventory uses a QAbstractTableModel with a sorting/filtering proxy instead of per-cell widgets.
 The analyzer returns immutable `FileMetadata` records, including an explicit
 content status and any extraction error.
@@ -60,11 +63,34 @@ modification time before and after each hash; files that disappear, change, or
 cannot be read are reported as issues rather than reported as confirmed
 duplicates. A result groups only files with both the same size and same hash,
 and reports the potentially redundant bytes without taking any file action.
+Storage estimates use distinct (st_dev, st_ino) identities captured during hashing,
+while retaining all matching paths. Two hard links alone have zero redundant bytes.
+This is a logical byte estimate, not a guarantee about physical disk space reclaimed.
 
 Hashing runs in a cancellable `QThread`. A cancelled check discards partial
 groups and leaves the previous complete results visible. A new completed scan
 replaces the candidate list and clears old duplicate results. Duplicate
 detection never deletes or modifies files.
+
+## Read-only organization planning
+
+After DirectoryScanWorker finishes, MainWindow passes the root and existing
+ClassifiedFile records to OrganizerPage.set_scan_result. The page replaces its
+previous snapshot using organizer.planner.propose_organization; cancelled and
+failed scans do not call this method.
+
+The planner has no PySide6 dependency. It reuses each classification's category
+and explanation, proposes root/Organized/category/source.name, and skips paths already at
+that destination. It counts destination keys across proposals, then checks disk
+occupancy (including dangling symlinks) and blocked Organized or category folders. A proposal
+contains current_path, destination, reason, and a tuple of conflict messages.
+Both conflict types can coexist. Path comparisons follow the host's case rules.
+Unknown extensions use the classifier's Other category.
+
+No directories are created and no files are changed. Conflicts describe the
+filesystem at planning time; rescan to refresh. Any future execution milestone
+must revalidate and obtain confirmation. Moves, SQLite history, undo, and ML
+remain unimplemented.
 
 ## Planned data flow
 
@@ -93,7 +119,7 @@ changing the GUI or scan worker.
 4. Add recursive scanning and metadata/content analysis with background work.
 5. Add an explainable rule-based classifier and a model-ready interface.
 6. Add and integrate SHA-256 exact duplicate detection.
-7. Generate explainable organization recommendations and previews.
+7. Generate explainable organization recommendations and previews (implemented, read-only).
 8. Add confirmation-gated moves, conflict checks, SQLite history, and undo.
 9. Expand tests, optimize large scans, and finish user documentation.
 

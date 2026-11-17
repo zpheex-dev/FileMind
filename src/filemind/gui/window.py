@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(title)
             button.setIcon(navigation_icon(title))
             button.setIconSize(QSize(18, 18))
-            if title in ("AI Organizer", "Activity History", "Settings"):
+            if title in ("Activity History", "Settings"):
                 button.setToolTip("Planned feature — interface preview")
             button.setObjectName("NavButton")
             button.setCheckable(True)
@@ -300,6 +300,7 @@ class MainWindow(QMainWindow):
         files_page = self._pages["My Files"]
         if isinstance(files_page, MyFilesPage):
             files_page.set_scan_result(directory, files)
+        self._pages["AI Organizer"].set_scan_result(directory, files)
         self._scan_files = [item.metadata for item in files]
         self._has_scan = True
         duplicate_page = self._pages["Duplicate Finder"]

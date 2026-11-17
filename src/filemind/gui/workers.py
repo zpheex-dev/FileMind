@@ -128,12 +128,26 @@ class DuplicateScanWorker(QThread):
 class PreviewWorker(QThread):
     completed = Signal(object)
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, cached: FileMetadata | None = None) -> None:
         super().__init__()
         self.path = path
+        self.cached = cached
 
     def run(self) -> None:
         try:
+            cached = self.cached
+            if cached is not None and cached.content_status != "error":
+                try:
+                    current = self.path.stat()
+                    if (current.st_size == cached.size_bytes
+                            and current.st_mtime_ns == cached.modified_at_ns):
+                        # Recheck readability even when content metadata is unchanged.
+                        with self.path.open("rb"):
+                            pass
+                        self.completed.emit(cached)
+                        return
+                except OSError:
+                    pass
             self.completed.emit(analyze_file(self.path))
         except Exception:
             LOGGER.exception("Preview failed for %s", self.path)
