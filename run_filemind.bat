@@ -3,9 +3,14 @@ setlocal
 cd /d "%~dp0"
 set "PYTHONPATH=%~dp0src;%PYTHONPATH%"
 
+if exist "dist\FileMind.exe" (
+    "dist\FileMind.exe"
+    exit /b
+)
+
 if exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m filemind.gui.app
-    exit /b %errorlevel%
+    exit /b
 )
 
 where py >nul 2>nul

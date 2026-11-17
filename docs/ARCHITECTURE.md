@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | `src/filemind/main.py` | `filemind-scan` command-line prototype | Lists files from a user-selected directory |
 | `src/filemind/scanner/` | Discover files and collect filesystem paths | Recursively scans without following symlinks; reports progress, cancellation, and per-directory errors |
-| `src/filemind/analyzer/metadata.py` | Extract filesystem metadata and supported text | Reads timestamps/size and bounded TXT, Markdown, Python, CSV, JSON, LOG, and PDF content |
+| `src/filemind/analyzer/metadata.py` | Extract filesystem metadata and supported text | Reads timestamps/size, optionally extracting bounded TXT, Markdown, Python, CSV, JSON, LOG, and PDF content |
 | `src/filemind/categorizer/classifier.py` | Categorize files behind a replaceable interface | Extension-based rules return a category, heuristic score, method, and explanation |
 | `src/filemind/organizer/` | Build and execute safe organization plans | Placeholder |
 | `src/filemind/database/` | Persist scan and operation history | Placeholder |
@@ -27,10 +27,12 @@
 | `src/filemind/duplicate_detector/` | Identify exact duplicate content | Groups same-size candidates by local SHA-256 and reports file issues without modifying files |
 | `src/filemind/gui/pages.py` | Dashboard and feature page layouts | Displays recursive scan metadata, local text previews, and duplicate-check results |
 | `src/filemind/gui/components.py`, `theme.py` | Shared components and visual design system | Reusable cards, badges, empty states, and dark styling |
-| `src/filemind/gui/workers.py` | Run GUI-triggered work outside the main thread | Scans, analyzes, and hashes duplicate candidates in `QThread`s with progress and cancellation |
+| `src/filemind/gui/workers.py` | Run GUI-triggered work outside the main thread | Scans, analyzes, and hashes duplicate candidates in `QThread`s with progress and cancellation; selected-file preview extraction uses a separate worker |
 
 The scanner returns a `ScanResult` containing discovered `pathlib.Path` objects,
 per-directory issues, and cancellation status. It never changes file contents.
+GUI scans request metadata only; the inspector caches at most eight on-demand text previews.
+The file inventory uses a QAbstractTableModel with a sorting/filtering proxy instead of per-cell widgets.
 The analyzer returns immutable `FileMetadata` records, including an explicit
 content status and any extraction error.
 
@@ -39,7 +41,7 @@ content status and any extraction error.
 1. The user selects a directory from the dashboard or shared header.
 2. A `QThread` recursively discovers regular files without following symlinks.
 3. The worker reports scan and analysis progress and can stop between directory entries or files.
-4. The analyzer records path, extension, size, and timestamps, then extracts supported text locally.
+4. The analyzer records path, extension, size, and timestamps, then records an on-demand content status. Selected-file previews extract text in a separate worker.
 5. The rule-based classifier maps file extensions to broad categories and explains each decision.
 6. The dashboard displays file count, total size, and category count; My Files shows metadata, category, heuristic score, and selected text preview.
 7. Accessible results are retained while filesystem issues and per-file analysis errors are reported.

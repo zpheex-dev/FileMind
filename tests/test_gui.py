@@ -6,8 +6,9 @@ from collections.abc import Callable
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEventLoop, QThread, QTimer
-from PySide6.QtTest import QSignalSpy
+from shiboken6 import isValid
+from PySide6.QtCore import QEventLoop, QThread, QTimer, Qt
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from filemind.analyzer.metadata import analyze_file
@@ -16,6 +17,57 @@ from filemind.gui.pages import DashboardPage, DuplicateFinderPage, MyFilesPage
 from filemind.gui.window import MainWindow, NAV_ITEMS
 from filemind.gui.workers import DirectoryScanWorker
 from filemind.scanner.scanner import ScanProgress, ScanResult
+
+
+def test_scan_worker_reports_unexpected_analysis_failure(tmp_path, monkeypatch):
+    (tmp_path / "notes.txt").write_text("notes")
+    def fail(*args, **kwargs):
+        raise RuntimeError("analysis failed")
+    monkeypatch.setattr("filemind.gui.workers.analyze_file", fail)
+    worker = DirectoryScanWorker(tmp_path)
+    failed = QSignalSpy(worker.failed)
+    worker.run()
+    assert failed.count() == 1
+    assert failed.at(0)[1] == "analysis failed"
+
+
+def test_duplicate_worker_reports_unexpected_failure(tmp_path, monkeypatch):
+    from filemind.gui.workers import DuplicateScanWorker
+    def fail(*args, **kwargs):
+        raise RuntimeError("hashing failed")
+    monkeypatch.setattr("filemind.gui.workers.find_duplicates", fail)
+    worker = DuplicateScanWorker([])
+    failed = QSignalSpy(worker.failed)
+    worker.run()
+    assert failed.count() == 1
+    assert failed.at(0)[0] == "hashing failed"
+
+
+def test_sorted_filtered_selection_previews_the_correct_file(application, tmp_path):
+    window = MainWindow()
+    page = window._pages["My Files"]
+    files = []
+    for name, content in (("small.txt", "tiny"), ("large.py", "print('large content')")):
+        path = tmp_path / name
+        path.write_text(content)
+        metadata = analyze_file(path, extract_content=False)
+        files.append(ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata)))
+    page.set_scan_result(tmp_path, files)
+    page._table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
+    page._table.setCurrentIndex(page._proxy.index(0, 0))
+    # Drain the active request and the latest queued selection.
+    for _ in range(3):
+        if page._preview_worker is not None:
+            _wait_for_worker(application, page._preview_worker)
+    assert page._proxy.index(0, 0).data() == "large.py"
+    assert "large content" in page._preview.toPlainText()
+    page._category_filter.setCurrentText("Documents")
+    for _ in range(3):
+        if page._preview_worker is not None:
+            _wait_for_worker(application, page._preview_worker)
+    assert page._proxy.rowCount() == 1
+    assert "tiny" in page._preview.toPlainText()
+    window.close()
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +85,7 @@ def _wait_for_worker(application: QApplication, worker: QThread) -> None:
         timeout.start(5000)
         loop.exec()
     timeout.stop()
+    assert not isValid(worker) or not worker.isRunning(), "Background task did not finish before the timeout"
     application.processEvents()
 
 
@@ -87,24 +140,32 @@ def test_scan_updates_dashboard_and_file_explorer(
     dashboard = window._pages["Dashboard"]
     assert isinstance(files_page, MyFilesPage)
     assert isinstance(dashboard, DashboardPage)
-    assert files_page._table.rowCount() == 2
-    assert files_page._table.item(0, 0).text() == "meeting-notes.txt"
-    assert files_page._table.item(0, 4).text() == "Documents"
-    assert files_page._table.item(1, 4).text() == "Code"
+    assert files_page._proxy.rowCount() == 2
+    assert files_page._proxy.index(0, 0).data() == "meeting-notes.txt"
+    assert files_page._proxy.index(0, 4).data() == "Documents"
+    assert files_page._proxy.index(1, 4).data() == "Code"
     assert dashboard._metric_cards[0].value_widget.text() == "2"
     assert dashboard._metric_cards[3].value_widget.text() == "2"
-    assert "Documents: 1" in dashboard._scan_empty_state.description_label.text()
+    assert dashboard._distribution_layout.count() == 2
+    assert {dashboard._distribution_layout.itemAt(i).widget().layout().itemAt(0).widget().text()
+            for i in range(2)} == {"Documents", "Code"}
+    if files_page._preview_worker is not None:
+        _wait_for_worker(application, files_page._preview_worker)
     assert "unchanged" in files_page._preview.toPlainText()
+    assert window._status_badge.text() == "LOCAL ONLY"
     assert file_path.read_text(encoding="utf-8") == "unchanged"
 
     files_page._search.setText("not found")
-    assert files_page._table.isRowHidden(0)
+    QTest.qWait(160)
+    assert files_page._proxy.rowCount() == 0
     files_page._search.setText("meeting")
-    assert not files_page._table.isRowHidden(0)
+    QTest.qWait(160)
+    assert files_page._proxy.rowCount() == 1
     files_page._search.clear()
     files_page._category_filter.setCurrentText("Code")
-    assert files_page._table.isRowHidden(0)
-    assert not files_page._table.isRowHidden(1)
+    assert files_page._proxy.rowCount() == 1
+    assert files_page._proxy.index(0, 4).data() == "Code"
+    window.close()
 
 
 def test_duplicate_finder_uses_scan_results_without_changing_files(
@@ -138,6 +199,8 @@ def test_duplicate_finder_uses_scan_results_without_changing_files(
     assert group.childCount() == 2
     assert "1 groups" in duplicate_page._summary.text()
     assert first.read_bytes() == second.read_bytes() == content
+    assert window._pages["Dashboard"]._metric_cards[2].value_widget.text() == "1"
+    window.close()
 
 
 def test_scan_can_be_cancelled_from_the_header(
@@ -184,8 +247,8 @@ def test_scan_can_be_cancelled_from_the_header(
     assert window._status_badge.text() == "SCAN CANCELLED"
     assert window._scan_button.isEnabled()
     assert not window._progress_bar.isVisible()
-    assert files_page._table.rowCount() == 1
-    assert files_page._table.item(0, 0).text() == "previous.txt"
+    assert files_page._proxy.rowCount() == 1
+    assert files_page._proxy.index(0, 0).data() == "previous.txt"
 
 
 def test_scan_worker_reports_filesystem_errors(tmp_path: Path) -> None:

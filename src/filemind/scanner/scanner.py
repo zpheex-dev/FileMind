@@ -67,6 +67,11 @@ def scan_directory(
 
                     entry_path = Path(entry.path)
                     try:
+                        # Windows junctions can create recursive directory cycles.
+                        if entry.is_symlink() or (
+                            hasattr(entry_path, "is_junction") and entry_path.is_junction()
+                        ):
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             pending_directories.append(entry_path)
                         elif entry.is_file(follow_symlinks=False):

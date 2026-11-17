@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from filemind.analyzer.metadata import FileMetadata
 from filemind.gui.components import StatusBadge
+from filemind.gui.icons import navigation_icon
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
 from filemind.gui.pages import (
@@ -79,13 +80,14 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_sidebar())
         root_layout.addWidget(self._build_content(), 1)
         self.setCentralWidget(root)
+        self.statusBar().showMessage("LOCAL WORKSPACE   /   Read-only analysis   /   Ready")
         self._show_page("Dashboard")
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setMinimumWidth(218)
-        sidebar.setMaximumWidth(250)
+        sidebar.setMinimumWidth(190)
+        sidebar.setMaximumWidth(210)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 18)
         layout.setSpacing(8)
@@ -107,7 +109,7 @@ class MainWindow(QMainWindow):
         brand_row.addWidget(brand_mark)
         brand_row.addLayout(brand_text, 1)
         layout.addLayout(brand_row)
-        layout.addSpacing(28)
+        layout.addSpacing(20)
 
         section = QLabel("WORKSPACE")
         section.setObjectName("SectionCaption")
@@ -115,7 +117,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(section)
 
         for title, icon in NAV_ITEMS:
-            button = QPushButton(f"{icon}   {title}")
+            button = QPushButton(title)
+            button.setIcon(navigation_icon(title))
+            button.setIconSize(QSize(18, 18))
+            if title in ("AI Organizer", "Activity History", "Settings"):
+                button.setToolTip("Planned feature — interface preview")
             button.setObjectName("NavButton")
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -165,7 +171,7 @@ class MainWindow(QMainWindow):
         page_container = QWidget()
         page_container.setObjectName("PageContainer")
         page_layout = QVBoxLayout(page_container)
-        page_layout.setContentsMargins(30, 25, 30, 24)
+        page_layout.setContentsMargins(20, 18, 20, 16)
         page_layout.setSpacing(0)
 
         for page_name, page_factory in PAGE_FACTORIES.items():
@@ -187,7 +193,7 @@ class MainWindow(QMainWindow):
     def _build_header(self) -> QFrame:
         header = QFrame()
         header.setObjectName("Header")
-        header.setMinimumHeight(82)
+        header.setMinimumHeight(72)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(30, 13, 30, 13)
 
@@ -197,6 +203,7 @@ class MainWindow(QMainWindow):
         self._header_title.setObjectName("HeaderTitle")
         self._header_subtitle = QLabel()
         self._header_subtitle.setObjectName("HeaderSubtitle")
+        self._header_subtitle.setWordWrap(True)
         heading_layout.addWidget(self._header_title)
         heading_layout.addWidget(self._header_subtitle)
         layout.addLayout(heading_layout, 1)
@@ -248,7 +255,7 @@ class MainWindow(QMainWindow):
         self._choose_directory()
 
     def _start_scan(self, directory: Path) -> None:
-        if self._duplicate_worker is not None:
+        if self._duplicate_worker is not None or self._scan_worker is not None:
             return
         worker = DirectoryScanWorker(directory)
         worker.progress.connect(self._on_scan_progress)
@@ -269,6 +276,9 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_scan_progress(self, stage: str, current: int, total: int) -> None:
+        self.statusBar().showMessage(
+            f"{stage.upper()}   /   {current:,}" + (f" of {total:,} files" if total else " files discovered")
+        )
         if stage == "Analyzing" and total > 0:
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(current)
@@ -295,7 +305,8 @@ class MainWindow(QMainWindow):
         duplicate_page = self._pages["Duplicate Finder"]
         if isinstance(duplicate_page, DuplicateFinderPage):
             duplicate_page.set_scan_available(True)
-        analysis_errors = sum(item.analysis_error is not None for item in files)
+        dashboard._metric_cards[2].set_value("—", "Ready to check")
+        analysis_errors = sum(item.metadata.analysis_error is not None for item in files)
         if issues or analysis_errors:
             for issue in issues:
                 LOGGER.warning("Scan issue in %s: %s", issue.path, issue.message)
@@ -348,6 +359,7 @@ class MainWindow(QMainWindow):
         worker = DuplicateScanWorker(self._scan_files)
         worker.progress.connect(self._on_duplicate_progress)
         worker.completed.connect(self._on_duplicate_completed)
+        worker.failed.connect(self._on_duplicate_failed)
         worker.finished.connect(self._on_duplicate_worker_finished)
         self._duplicate_worker = worker
         self._scan_button.setEnabled(False)
@@ -382,6 +394,9 @@ class MainWindow(QMainWindow):
             else:
                 duplicate_page.set_result(result)
 
+        if not result.cancelled:
+            dashboard = self._pages["Dashboard"]
+            dashboard._metric_cards[2].set_value(str(len(result.groups)), "Exact content matches")
         if result.cancelled:
             self._set_status("CHECK CANCELLED", muted=True)
             return
@@ -399,10 +414,18 @@ class MainWindow(QMainWindow):
         else:
             self._set_status("LOCAL ONLY", muted=False)
 
+    def _on_duplicate_failed(self, message: str) -> None:
+        page = self._pages["Duplicate Finder"]
+        if isinstance(page, DuplicateFinderPage):
+            page.set_cancelled()
+            page._summary.setText("Check failed; previous results were kept.")
+        self._set_status("CHECK FAILED", muted=True)
+        QMessageBox.warning(self, "Duplicate check failed", message)
+
     def _on_duplicate_worker_finished(self) -> None:
         worker = self._duplicate_worker
         self._duplicate_worker = None
-        self._scan_button.setEnabled(self._has_scan)
+        self._scan_button.setEnabled(True)
         self._progress_bar.hide()
         if worker is not None:
             worker.deleteLater()
@@ -417,6 +440,7 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
 
     def _set_status(self, text: str, muted: bool) -> None:
+        self.statusBar().showMessage(f"LOCAL WORKSPACE   /   {text}")
         self._status_badge.setText(text)
         self._status_badge.setObjectName(
             "StatusBadgeMuted" if muted else "StatusBadge"
@@ -430,16 +454,18 @@ class MainWindow(QMainWindow):
             for worker in (self._scan_worker, self._duplicate_worker)
             if worker is not None
         ]
+        files_page = self._pages["My Files"]
+        files_page._pending_preview = None
+        files_page._closing = True
+        if files_page._preview_worker is not None:
+            workers.append(files_page._preview_worker)
         for worker in workers:
-            if worker.isRunning():
+            if worker.isRunning() and hasattr(worker, "cancel"):
                 worker.cancel()
         for worker in workers:
             if worker.isRunning() and not worker.wait(5000):
                 LOGGER.warning("Background worker did not stop promptly during close")
                 event.ignore()
+                files_page._closing = False
                 return
-            worker.deleteLater()
-        if workers:
-            self._scan_worker = None
-            self._duplicate_worker = None
         event.accept()

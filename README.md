@@ -4,11 +4,25 @@ FileMind is a local-first desktop file organizer in early development. Its long-
 goal is to help users understand and organize files while keeping file processing
 on their own computer.
 
+## Launch the desktop app
+
+On Windows, double-click **`dist/FileMind.exe`** after building, or download the
+Windows executable from GitHub Releases. Python is not required to run the
+standalone executable. `run_filemind.bat` also prefers the built executable.
+
+On Linux, download `FileMind-linux-x86_64`, run `chmod +x FileMind-linux-x86_64`,
+then launch it. Linux builds are produced on Linux by the release workflow;
+a Windows build cannot run on Linux.
+
+The desktop interface uses Python with Qt/PySide6: compact graphite panels,
+cyan accents, sortable file columns, category filters, and a resizable inspector.
+
 ## Current status
 
 The PySide6 desktop shell can recursively scan a selected directory in a background
 thread, report progress, and cancel a scan. My Files displays file names, types,
-sizes, modification times, and extracted text previews for supported files.
+sizes and modification times. Supported text previews load in a background
+thread when a file is selected.
 Transparent extension-based classification with explanations is also available.
 The Duplicate Finder uses local SHA-256 hashing to report exact duplicates from
 the latest scan. It hashes only same-size candidates, runs in a background
@@ -16,7 +30,9 @@ thread, and can be cancelled. It never deletes or changes files.
 Machine-learning classification, recommendations, database-backed history, and
 safe move/undo workflows have not been implemented.
 
-Scanning and analysis are read-only. Text extraction supports TXT, Markdown,
+Scanning and analysis are read-only. Directory scans collect metadata without
+extracting every document. The file inventory uses a virtual table model,
+search is debounced, and only eight extracted previews are cached in memory. Text extraction supports TXT, Markdown,
 Python, CSV, JSON, and log files, plus PDFs through PyMuPDF. Extraction is bounded
 to protect responsiveness and memory use; oversized files are skipped with an
 explanation. Unsupported files still appear in the file list.
@@ -83,7 +99,19 @@ the previous complete results.
 
 ## Standalone executables
 
-To build a standalone executable for the current operating system, install the
+For a repeatable build on either Windows or Linux:
+
+```bash
+python -m pip install ".[build]"
+python build_app.py
+```
+
+The output is `dist/FileMind.exe` on Windows or `dist/FileMind` on Linux.
+The single-file package extracts its runtime at startup, so the first launch
+can take a few seconds. `--smoke-test` opens and automatically closes the app
+for packaging verification.
+
+To build a standalone executable manually for the current operating system, install the
 packaging extra and run PyInstaller from the project folder. PyInstaller builds
 for the operating system where it runs; it does not cross-compile.
 
@@ -118,6 +146,10 @@ will appear on the [Releases page](https://github.com/zpheex-dev/FileMind-vibeco
 ```powershell
 python -m pytest
 ```
+
+Tests run on Windows and Linux for pushes and pull requests. Release builds
+run tests before packaging. The suite also fails on unhandled Python exceptions
+inside Qt callbacks.
 
 ## Architecture
 

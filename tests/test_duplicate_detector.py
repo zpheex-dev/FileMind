@@ -7,6 +7,15 @@ from filemind.analyzer.metadata import analyze_file
 from filemind.duplicate_detector.detector import find_duplicates
 
 
+def test_repeated_path_is_not_a_duplicate_of_itself(tmp_path):
+    path = tmp_path / "one.txt"
+    path.write_text("content")
+    metadata = analyze_file(path)
+    result = find_duplicates([metadata, metadata])
+    assert not result.groups
+    assert result.files_hashed == 0
+
+
 def test_finds_exact_duplicates_and_skips_singletons(tmp_path: Path) -> None:
     content = b"same content"
     first = tmp_path / "first.txt"

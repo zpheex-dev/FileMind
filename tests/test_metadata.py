@@ -7,6 +7,24 @@ import filemind.analyzer.metadata as metadata_module
 from filemind.analyzer.metadata import analyze_file
 
 
+def test_metadata_only_scan_does_not_extract_text(tmp_path, monkeypatch):
+    path = tmp_path / "notes.txt"
+    path.write_text("Local content")
+    def unexpected_extraction(*args):
+        raise AssertionError("Metadata scans must not read file contents")
+    monkeypatch.setattr(metadata_module, "_extract_text", unexpected_extraction)
+    result = analyze_file(path, extract_content=False)
+    assert result.content_status == "pending"
+    assert result.extracted_text is None
+    assert result.size_bytes == path.stat().st_size
+
+
+def test_directory_is_not_treated_as_a_file(tmp_path):
+    result = analyze_file(tmp_path)
+    assert result.content_status == "error"
+    assert "Not a regular file" in result.analysis_error
+
+
 def test_analyze_text_file_extracts_metadata_and_content(tmp_path: Path) -> None:
     file_path = tmp_path / "notes.txt"
     file_path.write_text("A local note", encoding="utf-8")

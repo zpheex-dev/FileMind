@@ -1,6 +1,7 @@
 """Local SHA-256 detection of exact duplicate files."""
 
 import hashlib
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,9 +54,14 @@ def find_duplicates(
     """Hash only same-size candidates and return groups of identical content."""
     size_groups: dict[int, list[FileMetadata]] = defaultdict(list)
     issues: list[DuplicateIssue] = []
+    seen_paths: set[str] = set()
     for metadata in files:
         if cancellation_event is not None and cancellation_event.is_set():
             return DuplicateResult((), tuple(issues), 0, True)
+        key = os.path.normcase(str(metadata.path.absolute()))
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
         if metadata.size_bytes is None:
             issues.append(
                 DuplicateIssue(metadata.path, "File size is unavailable; skipped.")
@@ -97,6 +103,7 @@ def find_duplicates(
                 continue
 
             digest = hashlib.sha256()
+            file_bytes_read = 0
             with metadata.path.open("rb") as file:
                 while True:
                     if cancellation_event is not None and cancellation_event.is_set():
@@ -109,6 +116,9 @@ def find_duplicates(
                     chunk = file.read(HASH_CHUNK_SIZE)
                     if not chunk:
                         break
+                    file_bytes_read += len(chunk)
+                    if file_bytes_read > before.st_size:
+                        raise OSError("File grew while hashing; skipped.")
                     digest.update(chunk)
                     bytes_hashed += len(chunk)
                     if (

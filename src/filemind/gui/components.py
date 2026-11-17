@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from filemind.gui.icons import navigation_icon
 
 
 class SurfaceCard(QFrame):
@@ -83,6 +84,7 @@ class EmptyState(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         icon_label = QLabel(icon)
+        icon_label.setPixmap(navigation_icon("My Files").pixmap(26, 26))
         icon_label.setObjectName("EmptyIcon")
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label = QLabel(title)

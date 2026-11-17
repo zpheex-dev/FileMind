@@ -1,6 +1,7 @@
 """Local file metadata and supported document text extraction."""
 
 import os
+import stat as stat_module
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ MAX_PDF_PAGES = 50
 MAX_EXTRACTED_CHARACTERS = 100_000
 TEXT_EXTENSIONS = {".txt", ".md", ".py", ".csv", ".json", ".log"}
 
-ContentStatus = Literal["extracted", "unsupported", "skipped", "error"]
+ContentStatus = Literal["extracted", "unsupported", "skipped", "error", "pending"]
 
 
 @dataclass(frozen=True)
@@ -33,12 +34,14 @@ class FileMetadata:
     modified_at_ns: int | None = None
 
 
-def analyze_file(file_path: str | Path) -> FileMetadata:
+def analyze_file(file_path: str | Path, *, extract_content: bool = True) -> FileMetadata:
     """Extract basic metadata and bounded text content from one local file."""
     path = Path(file_path)
     extension = path.suffix.lower()
     try:
         stat = path.stat()
+        if not stat_module.S_ISREG(stat.st_mode):
+            raise OSError("Not a regular file")
     except OSError as error:
         return FileMetadata(
             path=path,
@@ -62,11 +65,10 @@ def analyze_file(file_path: str | Path) -> FileMetadata:
     else:
         metadata_error = None
 
-    text, status, truncated, content_error = _extract_text(
-        path,
-        extension,
-        stat.st_size,
-    )
+    if extract_content:
+        text, status, truncated, content_error = _extract_text(path, extension, stat.st_size)
+    else:
+        text, status, truncated, content_error = None, "pending", False, None
     errors = [error for error in (metadata_error, content_error) if error]
     return FileMetadata(
         path=path,
