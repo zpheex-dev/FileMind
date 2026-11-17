@@ -30,39 +30,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install application and build tools
-        run: python -m pip install ".[build]"
+        run: python -m pip install ".[build,dev]"
 
-      - name: Build Windows executable
-        if: runner.os == 'Windows'
-        run: >-
-          pyinstaller
-          --noconfirm
-          --clean
-          --onefile
-          --windowed
-          --name FileMind
-          --paths src
-          --collect-all pymupdf
-          --specpath build\pyinstaller
-          --workpath build\pyinstaller\work
-          --distpath dist
-          src\filemind\gui\app.py
-
-      - name: Build Linux executable
+      - name: Install Linux Qt libraries
         if: runner.os == 'Linux'
-        run: >-
-          pyinstaller
-          --noconfirm
-          --clean
-          --onefile
-          --windowed
-          --name FileMind
-          --paths src
-          --collect-all pymupdf
-          --specpath build/pyinstaller
-          --workpath build/pyinstaller/work
-          --distpath dist
-          src/filemind/gui/app.py
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+
+      - name: Test before packaging
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build executable
+        run: python build_app.py
+
+      - name: Verify packaged startup
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import subprocess, sys; subprocess.run(['dist/FileMind.exe' if sys.platform == 'win32' else './dist/FileMind', '--smoke-test'], check=True, timeout=60)"
 
       - name: Stage Windows executable
         if: runner.os == 'Windows'
