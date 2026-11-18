@@ -50,6 +50,12 @@ def _destination_conflicts(destination: Path, root: Path) -> list[str]:
     return conflicts
 
 
+def validate_folder(folder):
+    if (not folder or folder in (".", "..") or "/" in folder or "\\" in folder
+            or folder.rstrip(" .") != folder or ":" in folder):
+        raise ValueError("Folder name must be a single valid folder name")
+
+
 def propose_organization(
     directory: Path, files: Iterable[ClassifiedFile],
     folder_names: dict[str, str] | None = None,
@@ -74,9 +80,7 @@ def propose_organization(
         if category in ("", ".", "..") or "/" in category or "\\" in category:
             raise ValueError("Category must be a single folder name")
         folder = (folder_names or {}).get(category, category)
-        if (not folder or folder in (".", "..") or "/" in folder or "\\" in folder
-                or folder.rstrip(" .") != folder or ":" in folder):
-            raise ValueError("Folder name must be a single valid folder name")
+        validate_folder(folder)
         destination = organized_root / folder / source.name
         if source_key == _path_key(destination):
             continue

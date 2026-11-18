@@ -125,21 +125,9 @@ The single-file package extracts its runtime at startup, so the first launch
 can take a few seconds. `--smoke-test` opens and automatically closes the app
 for packaging verification.
 
-To build a standalone executable manually for the current operating system, install the
-packaging extra and run PyInstaller from the project folder. PyInstaller builds
-for the operating system where it runs; it does not cross-compile.
-
-```powershell
-python -m pip install ".[build]"
-pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build\pyinstaller --workpath build\pyinstaller\work --distpath dist src\filemind\gui\app.py
-```
-
-On Linux, use the same command with Linux-style paths:
-
-```bash
-python -m pip install ".[build]"
-pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build/pyinstaller --workpath build/pyinstaller/work --distpath dist src/filemind/gui/app.py
-```
+The builder includes the SVG from the checkout. Verify the executable and its
+rendered icon with `dist/FileMind.exe --smoke-test` on Windows or
+`QT_QPA_PLATFORM=offscreen ./dist/FileMind --smoke-test` on Linux.
 
 The Windows output is `dist\FileMind.exe`; the Linux output is `dist/FileMind`.
 The Linux release is named `FileMind-linux-x86_64`. Make it executable, then

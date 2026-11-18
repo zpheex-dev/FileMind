@@ -460,6 +460,7 @@ class MainWindow(QMainWindow):
         files_page._closing = True
         if files_page._preview_worker is not None:
             workers.append(files_page._preview_worker)
+        workers.extend(self._pages["AI Organizer"].workers)
         for worker in workers:
             if worker.isRunning() and hasattr(worker, "cancel"):
                 worker.cancel()

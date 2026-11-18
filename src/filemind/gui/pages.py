@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from filemind.organizer.planner import propose_organization
+from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel
 from filemind.gui.workers import PreviewWorker
 
@@ -595,17 +595,14 @@ class OrganizerPage(QWidget):
         controls.addWidget(self._folder_button)
         controls.addStretch(1)
         card.content_layout.addLayout(controls)
-        self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Current path", "Proposed destination", "Reason", "Conflict status"])
-        self._tree.setRootIsDecorated(False)
-        self._tree.setAlternatingRowColors(True)
-        self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column in range(4):
-            self._tree.setColumnWidth(column, 240)
-        card.content_layout.addWidget(self._tree)
+        self.model = ProposalModel(self)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.horizontalHeader().setDefaultSectionSize(240)
+        card.content_layout.addWidget(self.table)
         layout.addWidget(card)
-        self._proposals = ()
+        self.generation = 0
+        self.workers = set()
         self._folder_names = {}
         self._directory = None
         self._files = []
@@ -626,45 +623,45 @@ class OrganizerPage(QWidget):
         updated = dict(self._folder_names)
         updated[category] = folder
         try:
-            propose_organization(self._directory, self._files, updated)
+            from filemind.organizer.planner import validate_folder
+            validate_folder(folder)
         except ValueError as error:
             QMessageBox.warning(self, "Invalid folder name", str(error))
             return
         self._folder_names = updated
-        self.set_scan_result(self._directory, self._files)
+        self._build_plan()
 
     def selected_proposals(self):
-        return tuple(
-            proposal for index, proposal in enumerate(self._proposals)
-            if self._tree.topLevelItem(index).checkState(0) == Qt.CheckState.Checked
-            and not proposal.has_conflict
-        )
+        return tuple(row for row in self.model.rows
+                     if not row.has_conflict and row.current_path not in self.model.unchecked)
 
-    def set_scan_result(self, directory: Path, files: list[ClassifiedFile]) -> None:
-        # Replace the entire snapshot, including when the new scan is empty.
+    def set_scan_result(self, directory, files):
+        if directory != self._directory:
+            self.model.unchecked.clear()
         self._directory, self._files = directory, files
         self._folder_button.setEnabled(bool(files))
-        self._tree.clear()
-        self._proposals = ()
-        self._proposals = propose_organization(directory, files, self._folder_names)
-        for proposal in self._proposals:
-            row = QTreeWidgetItem([
-                str(proposal.current_path),
-                str(proposal.destination),
-                proposal.reason,
-                "; ".join(proposal.conflicts) or "No conflict detected",
-            ])
-            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            row.setCheckState(0, Qt.CheckState.Unchecked if proposal.has_conflict else Qt.CheckState.Checked)
-            for column in range(4):
-                row.setToolTip(column, row.text(column))
-            self._tree.addTopLevelItem(row)
-        conflicts = sum(proposal.has_conflict for proposal in self._proposals)
-        self._summary.setText(
-            f"{len(self._proposals):,} proposed moves · {conflicts:,} with conflicts. "
-            "Preview only — no files or folders have been changed."
-        )
-        self._summary.setToolTip(str(directory))
+        self._build_plan()
+
+    def _build_plan(self):
+        self.generation += 1
+        self.model.replace(())
+        self._summary.setText("Checking destinations…")
+        worker = PlanWorker(self.generation, self._directory, self._files, dict(self._folder_names), self)
+        self.workers.add(worker)
+        worker.ready.connect(self._accept_plan)
+        worker.finished.connect(self._worker_finished)
+        worker.start()
+
+    def _worker_finished(self):
+        worker = self.sender()
+        self.workers.discard(worker)
+        worker.deleteLater()
+
+    def _accept_plan(self, generation, rows, error):
+        if generation == self.generation:
+            self.model.replace(rows)
+            self._summary.setText(error or f"{len(rows):,} proposed moves")
+
 
 
 class DuplicateFinderPage(QWidget):

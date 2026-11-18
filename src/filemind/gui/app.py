@@ -21,6 +21,11 @@ def main() -> int:
     application.setFont(QFont("Segoe UI" if sys.platform == "win32" else "DejaVu Sans", 9))
     application.setStyleSheet(APP_STYLESHEET)
 
+    if "--smoke-test" in sys.argv:
+        image = application.windowIcon().pixmap(64, 64).toImage()
+        if image.isNull() or image.pixelColor(32, 32).alpha() == 0:
+            raise RuntimeError("Bundled FileMind icon did not render")
+
     window = MainWindow()
     window.show()
     if "--smoke-test" in sys.argv:

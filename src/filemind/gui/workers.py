@@ -140,6 +140,7 @@ class PreviewWorker(QThread):
                 try:
                     current = self.path.stat()
                     if (current.st_size == cached.size_bytes
+                            and cached.identity == (current.st_dev, current.st_ino)
                             and current.st_mtime_ns == cached.modified_at_ns):
                         # Recheck readability even when content metadata is unchanged.
                         with self.path.open("rb"):
