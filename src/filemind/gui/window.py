@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QStandardPaths
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -25,6 +25,8 @@ from filemind.gui.components import StatusBadge
 from filemind.gui.icons import navigation_icon
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
+from filemind.gui.history import JournalWorker
+from filemind.organizer.organizer import MoveJournal
 from filemind.gui.pages import (
     DashboardPage,
     DuplicateFinderPage,
@@ -58,7 +60,7 @@ NAV_ITEMS = (
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, history_path=None) -> None:
         super().__init__()
         self.setWindowTitle("FileMind")
         self.setMinimumSize(980, 680)
@@ -77,11 +79,18 @@ class MainWindow(QMainWindow):
         self._duplicate_worker: DuplicateScanWorker | None = None
         self._scan_files: list[FileMetadata] = []
         self._has_scan = False
+        if history_path is None:
+            location = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+            history_path = Path(location) / "moves.sqlite3"
+        self._journal = MoveJournal(history_path)
+        self._journal_worker = None
         root_layout.addWidget(self._build_sidebar())
         root_layout.addWidget(self._build_content(), 1)
         self.setCentralWidget(root)
-        self.statusBar().showMessage("LOCAL WORKSPACE   /   Read-only analysis   /   Ready")
+        self.statusBar().showMessage("LOCAL WORKSPACE   /   Ready")
         self._show_page("Dashboard")
+        if self._journal.database.exists():
+            self._run_journal("reconcile")
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
@@ -120,7 +129,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(title)
             button.setIcon(navigation_icon(title))
             button.setIconSize(QSize(18, 18))
-            if title in ("Activity History", "Settings"):
+            if title == "Settings":
                 button.setToolTip("Planned feature — interface preview")
             button.setObjectName("NavButton")
             button.setCheckable(True)
@@ -185,6 +194,8 @@ class MainWindow(QMainWindow):
         if isinstance(duplicate_page, DuplicateFinderPage):
             duplicate_page.find_requested.connect(self._handle_duplicate_button)
 
+        self._pages["AI Organizer"].apply_requested.connect(self._apply_moves)
+        self._pages["Activity History"].undo_requested.connect(self._undo_moves)
         page_layout.addWidget(self._stack)
         scroll_area.setWidget(page_container)
         layout.addWidget(scroll_area, 1)
@@ -231,6 +242,49 @@ class MainWindow(QMainWindow):
         for name, button in self._buttons.items():
             button.setChecked(name == page_name)
 
+    def _confirm_moves(self, verb, count):
+        prompt = f"{verb} {count:,} selected file move(s)?"
+        return QMessageBox.question(self, verb + " selected moves", prompt, QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No) == QMessageBox.Yes
+
+    def _apply_moves(self):
+        page = self._pages["AI Organizer"]
+        selected = page.selected_proposals()
+        if selected and self._confirm_moves("Apply", len(selected)):
+            metadata = {item.metadata.path: item.metadata for item in page._files}
+            self._run_journal("apply", page._directory, selected, metadata)
+
+    def _undo_moves(self, ids):
+        if ids and self._confirm_moves("Undo", len(ids)):
+            self._run_journal("undo", ids)
+
+    def _run_journal(self, action, *args):
+        if self._journal_worker or self._scan_worker or self._duplicate_worker:
+            return
+        worker = JournalWorker(self._journal, action, args, self)
+        self._journal_worker = worker
+        self.centralWidget().setEnabled(False)
+        self._set_status("CHECKING HISTORY" if action == "reconcile" else "PROCESSING MOVES", muted=True)
+        worker.finished.connect(self._journal_finished)
+        worker.start()
+
+    def _journal_finished(self):
+        worker = self._journal_worker
+        self._journal_worker = None
+        self.centralWidget().setEnabled(True)
+        self._set_status("LOCAL ONLY", muted=False)
+        history = self._pages["Activity History"]
+        if worker.error:
+            QMessageBox.warning(self, "Activity History", worker.error)
+        else:
+            history.show_rows(worker.rows)
+        if worker.action != "reconcile":
+            self._show_page("Activity History")
+            directory = self._pages["AI Organizer"]._directory
+            if directory is not None:
+                self._start_scan(directory)
+        worker.deleteLater()
+
     def _choose_directory(self) -> None:
         if self._scan_worker is not None or self._duplicate_worker is not None:
             return
@@ -264,6 +318,8 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(self._on_scan_cancelled)
         worker.finished.connect(self._on_scan_worker_finished)
         self._scan_worker = worker
+        self._pages["AI Organizer"].setEnabled(False)
+        self._pages["Activity History"].setEnabled(False)
         self._scan_button.setText("Cancel scan")
         self._scan_button.setEnabled(True)
         self._progress_bar.setRange(0, 0)
@@ -364,6 +420,8 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_duplicate_worker_finished)
         self._duplicate_worker = worker
         self._scan_button.setEnabled(False)
+        self._pages["AI Organizer"].setEnabled(False)
+        self._pages["Activity History"].setEnabled(False)
         self._progress_bar.setRange(0, 1000)
         self._progress_bar.setValue(0)
         self._progress_bar.show()
@@ -425,6 +483,8 @@ class MainWindow(QMainWindow):
 
     def _on_duplicate_worker_finished(self) -> None:
         worker = self._duplicate_worker
+        self._pages["AI Organizer"].setEnabled(True)
+        self._pages["Activity History"].setEnabled(True)
         self._duplicate_worker = None
         self._scan_button.setEnabled(True)
         self._progress_bar.hide()
@@ -433,6 +493,8 @@ class MainWindow(QMainWindow):
 
     def _on_scan_worker_finished(self) -> None:
         worker = self._scan_worker
+        self._pages["AI Organizer"].setEnabled(True)
+        self._pages["Activity History"].setEnabled(True)
         self._scan_worker = None
         self._scan_button.setEnabled(True)
         self._scan_button.setText("Scan folder")
@@ -450,6 +512,10 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._journal_worker is not None:
+            event.ignore()
+            self.statusBar().showMessage("Finishing file operations before closing")
+            return
         workers = [
             worker
             for worker in (self._scan_worker, self._duplicate_worker)

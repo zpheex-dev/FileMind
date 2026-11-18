@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableView,
     QSplitter,
-    QTableWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QToolTip,
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel
 from filemind.gui.workers import PreviewWorker
@@ -574,6 +574,8 @@ def _format_size(size_bytes: int | None) -> str:
 
 
 class OrganizerPage(QWidget):
+    apply_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
@@ -593,9 +595,15 @@ class OrganizerPage(QWidget):
         self._folder_button.setEnabled(False)
         self._folder_button.clicked.connect(self._customize_folder)
         controls.addWidget(self._folder_button)
+        self.apply_button = QPushButton("Apply selected moves")
+        self.apply_button.setEnabled(False)
+        self.apply_button.clicked.connect(self.apply_requested)
+        controls.addWidget(self.apply_button)
         controls.addStretch(1)
         card.content_layout.addLayout(controls)
         self.model = ProposalModel(self)
+        self.model.dataChanged.connect(self._update_apply)
+        self.model.modelReset.connect(self._update_apply)
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.horizontalHeader().setDefaultSectionSize(240)
@@ -630,6 +638,10 @@ class OrganizerPage(QWidget):
             return
         self._folder_names = updated
         self._build_plan()
+
+    def _update_apply(self):
+        self.apply_button.setEnabled(any(not row.has_conflict and row.current_path not in self.model.unchecked
+                                         for row in self.model.rows))
 
     def selected_proposals(self):
         return tuple(row for row in self.model.rows
@@ -808,44 +820,6 @@ class DuplicateFinderPage(QWidget):
                 description += f" {len(result.issues)} file issue(s) occurred."
             self._empty_state.set_message(title, description)
             self._view_stack.setCurrentWidget(self._empty_state)
-
-
-class ActivityHistoryPage(QWidget):
-    def __init__(self) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(16)
-
-        history_card = SurfaceCard()
-        header = QHBoxLayout()
-        add_card_heading(
-            history_card.content_layout,
-            "Operations",
-            "Original and destination paths will be recorded for each successful move.",
-        )
-        header.addStretch(1)
-        add_status_row(header, "UNDO AVAILABLE AFTER OPERATIONS", muted=True)
-        history_card.content_layout.addLayout(header)
-
-        table = QTableWidget(0, 4)
-        table.setHorizontalHeaderLabels(
-            ["Operation", "Original path", "New path", "Status"]
-        )
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setMinimumHeight(200)
-        history_card.content_layout.addWidget(table)
-        history_card.content_layout.addWidget(
-            EmptyState(
-                "No operations recorded",
-                "Completed file moves and their undo status will appear here.",
-                icon="◷",
-            )
-        )
-        layout.addWidget(history_card)
-        layout.addStretch(1)
 
 
 class SettingsPage(QWidget):

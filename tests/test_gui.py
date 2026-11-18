@@ -436,3 +436,51 @@ def test_old_plan_completion_cannot_replace_new_scan(application, tmp_path):
     wait_plan(application, page)
     page._accept_plan(old_generation, ("obsolete",), "")
     assert page.model.rowCount() == 0
+
+
+def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from test_moves import user_file
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    for name in ("a.txt", "b.txt"):
+        user_file(folder / name, name)
+    history_path = tmp_path / "history.db"
+    window = MainWindow(history_path)
+    window._start_scan(folder)
+    _wait_for_worker(application, window._scan_worker)
+    page = window._pages["AI Organizer"]
+    wait_plan(application, page)
+    page.model.setData(page.model.index(1, 0), Qt.Unchecked, Qt.CheckStateRole)
+    prompts = []
+    responses = iter([QMessageBox.No, QMessageBox.Yes, QMessageBox.Yes])
+
+    def confirm(parent, title, prompt, *args):
+        prompts.append(prompt)
+        return next(responses)
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    page.apply_button.click()
+    assert not history_path.exists() and not (folder / "Organized").exists()
+    page.apply_button.click()
+    _wait_for_worker(application, window._journal_worker)
+    if window._scan_worker is not None:
+        _wait_for_worker(application, window._scan_worker)
+    wait_plan(application, page)
+    assert (folder / "Organized/Documents/a.txt").read_text() == "a.txt"
+    assert (folder / "b.txt").read_text() == "b.txt"
+    assert window.close()
+    reopened = MainWindow(history_path)
+    _wait_for_worker(application, reopened._journal_worker)
+    reopened._buttons["Activity History"].click()
+    history = reopened._pages["Activity History"]
+    history.table.selectRow(0)
+    history.button.click()
+    _wait_for_worker(application, reopened._journal_worker)
+    assert history.model.rows[0]["status"] == "undone"
+    assert (folder / "a.txt").read_text() == "a.txt"
+    assert not (folder / "Organized/Documents/a.txt").exists()
+    assert all("1 selected file" in prompt for prompt in prompts)
+    assert len(prompts) == 3
+    assert reopened.close()
