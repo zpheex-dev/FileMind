@@ -2,12 +2,15 @@
 
 from contextlib import closing, contextmanager
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
 from filemind.organizer.filesystem import digest, move, parent_handle, personal_parts
+
+LOGGER = logging.getLogger(__name__)
 
 FILE_ERRORS = (OSError, ValueError)
 if os.name == "nt":
@@ -84,6 +87,7 @@ class MoveJournal:
                 try:
                     checksum = self._digest(Path(row["original"]), json.loads(row["signature"]))
                 except FILE_ERRORS as error:
+                    LOGGER.warning("Skipping %s: %s", row["original"], error)
                     with db:
                         db.execute("UPDATE moves SET status='skipped',reason=? WHERE id=? AND status='queued'",
                                    (str(error), row["id"]))
@@ -118,6 +122,7 @@ class MoveJournal:
                 status, reason = ("moved" if undo else "skipped"), str(error)
                 if undo:
                     reason = "Undo blocked: " + reason
+                LOGGER.warning("%s: %s", row["original"], reason)
             else:
                 status, reason = ("undone" if undo else "moved"), ""
             db.execute("UPDATE moves SET status=?,reason=? WHERE id=?", (status, reason, entry_id))
