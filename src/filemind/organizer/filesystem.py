@@ -13,8 +13,8 @@ def _personal(info):
     if os.name != "nt" and (info.st_uid != os.getuid() or info.st_uid == 0):
         raise PermissionError("Only files and folders owned by the current user can be organized")
     attributes = getattr(info, "st_file_attributes", 0)
-    if attributes & (stat.FILE_ATTRIBUTE_REPARSE_POINT | stat.FILE_ATTRIBUTE_SYSTEM):
-        raise PermissionError("System files and links cannot be organized")
+    if attributes & (stat.FILE_ATTRIBUTE_REPARSE_POINT | stat.FILE_ATTRIBUTE_SYSTEM | stat.FILE_ATTRIBUTE_HIDDEN):
+        raise PermissionError("System files, hidden files and links cannot be organized")
 
 
 def personal_parts(path, home):
@@ -35,16 +35,15 @@ def parent_handle(path, home, create_from=None):
     current = home
     with ExitStack() as stack:
         if os.name == "nt":
-            import win32con
             import win32file
 
             def pin(directory):
                 _personal(directory.lstat())
                 handle = win32file.CreateFile(
-                    str(directory), win32con.FILE_READ_ATTRIBUTES,
-                    win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE, None,
-                    win32con.OPEN_EXISTING, win32con.FILE_FLAG_BACKUP_SEMANTICS |
-                    win32con.FILE_FLAG_OPEN_REPARSE_POINT, None,
+                    str(directory), 0,
+                    win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE, None,
+                    win32file.OPEN_EXISTING, win32file.FILE_FLAG_BACKUP_SEMANTICS |
+                    win32file.FILE_FLAG_OPEN_REPARSE_POINT, None,
                 )
                 stack.callback(handle.Close)
                 _personal(directory.lstat())
@@ -113,12 +112,14 @@ def digest(parent, name, expected):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         stream = os.fdopen(fd, "rb")
     with stream:
-        if signature(os.fstat(stream.fileno())) != expected:
+        before = os.fstat(stream.fileno())
+        if signature(before) != expected:
             raise ValueError("File changed before reading")
         value = hashlib.file_digest(stream, "sha256").hexdigest()
-        if signature(os.fstat(stream.fileno())) != expected:
+        after = os.fstat(stream.fileno())
+        if signature(after) != expected or after.st_ctime_ns != before.st_ctime_ns:
             raise ValueError("File changed while reading")
-    return value
+    return value, after.st_ctime_ns
 
 
 def rename_new(source, name, destination, target):
@@ -145,7 +146,8 @@ def move(root, home, original, organized, expected, checksum, undo=False):
         raise ValueError("Invalid proposed destination")
     source, dest = (organized, original) if undo else (original, organized)
     with parent_handle(source.parent, home) as src:
-        if digest(src, source.name, expected) != checksum:
+        value, change_time = digest(src, source.name, expected)
+        if value != checksum:
             raise ValueError("File contents have changed")
         create_from = None if undo else root / "Organized"
         with parent_handle(dest.parent, home, create_from) as dst:
@@ -158,5 +160,7 @@ def move(root, home, original, organized, expected, checksum, undo=False):
                 pass
             else:
                 raise FileExistsError("Destination already exists")
-            validate(src, source.name, expected)
+            current = validate(src, source.name, expected)
+            if current.st_ctime_ns != change_time:
+                raise ValueError("File changed before rename")
             rename_new(src, source.name, dst, dest.name)

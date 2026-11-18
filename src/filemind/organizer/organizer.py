@@ -40,7 +40,8 @@ class MoveJournal:
     def _digest(self, path, expected):
         personal_parts(path, self.home)
         with parent_handle(path.parent, self.home) as directory:
-            return digest(directory, path.name, expected)
+            checksum, _ = digest(directory, path.name, expected)
+            return checksum
 
     def apply(self, root, selected, metadata):
         batch = uuid4().hex

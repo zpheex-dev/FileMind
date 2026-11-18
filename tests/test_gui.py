@@ -442,6 +442,8 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     from PySide6.QtWidgets import QMessageBox
     from test_moves import user_file
 
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, message: pytest.fail(f"{title}: {message}"))
+
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     folder = tmp_path / "Downloads"
     folder.mkdir()
