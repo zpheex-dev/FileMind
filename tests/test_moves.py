@@ -184,3 +184,17 @@ def test_interrupted_move_with_both_paths_needs_review(workspace, monkeypatch):
     assert journal.history()[0]["status"] == "needs review"
     assert rows[0].current_path.read_text() == "new occupant"
     assert rows[0].destination.read_text() == "a.txt"
+
+
+def test_second_instance_cannot_reconcile_live_batch(workspace, monkeypatch):
+    journal, root, rows, metadata = workspace
+    other = MoveJournal(journal.database)
+    rename = filesystem.rename_new
+
+    def reopen_during_move(*args):
+        other.reconcile()
+        rename(*args)
+
+    monkeypatch.setattr(filesystem, "rename_new", reopen_during_move)
+    journal.apply(root, rows, metadata)
+    assert all(row["status"] == "moved" for row in journal.history())

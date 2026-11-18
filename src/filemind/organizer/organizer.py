@@ -1,6 +1,6 @@
 """Durable per-file move intents. Recovery observes paths and never renames them."""
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -13,6 +13,10 @@ FILE_ERRORS = (OSError, ValueError)
 if os.name == "nt":
     import pywintypes
     FILE_ERRORS += (pywintypes.error,)
+
+
+class JournalBusyError(RuntimeError):
+    pass
 
 
 class MoveJournal:
@@ -30,6 +34,25 @@ class MoveJournal:
             checksum TEXT, status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
             created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         return db
+
+    @contextmanager
+    def _session(self):
+        # Hold a process lock across the commits on either side of each rename.
+        # Closing the file (including process termination) releases the lock.
+        self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with self.database.with_suffix(".lock").open("a+b") as lock:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise JournalBusyError("Another FileMind instance is processing moves") from error
+            with closing(self._connect()) as db:
+                yield db
 
     def history(self):
         if not self.database.exists():
@@ -53,7 +76,7 @@ class MoveJournal:
             record = metadata[source]
             expected = [*(record.identity or (None, None)), record.size_bytes, record.modified_at_ns]
             rows.append((batch, str(root), str(source), str(proposal.destination), json.dumps(expected)))
-        with closing(self._connect()) as db:
+        with self._session() as db:
             with db:
                 db.executemany("""INSERT INTO moves(batch,root,original,destination,signature,status)
                                VALUES(?,?,?,?,?,'queued')""", rows)
@@ -72,7 +95,7 @@ class MoveJournal:
         return batch
 
     def undo(self, ids):
-        with closing(self._connect()) as db:
+        with self._session() as db:
             for entry_id in ids:
                 with db:
                     eligible = db.execute("UPDATE moves SET status='undoing',reason='' WHERE id=? AND status='moved'",
@@ -111,16 +134,23 @@ class MoveJournal:
     def reconcile(self):
         if not self.database.exists():
             return
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            db.execute("UPDATE moves SET status='skipped',reason='Interrupted before move' WHERE status='queued'")
-            for row in db.execute("SELECT * FROM moves WHERE status IN ('moving','undoing')").fetchall():
-                locations = self._location(row["original"], row), self._location(row["destination"], row)
-                if locations == ("absent", "matches"):
-                    status = "moved"
-                elif locations == ("matches", "absent"):
-                    status = "undone" if row["status"] == "undoing" else "skipped"
-                else:
-                    status = "needs review"
-                db.execute("UPDATE moves SET status=?,reason='Recovered after interruption' WHERE id=?",
-                           (status, row["id"]))
+        try:
+            with self._session() as db, db:
+                self._recover(db)
+        except JournalBusyError:
+            # The other instance still owns its intents.
+            return
+
+    def _recover(self, db):
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("UPDATE moves SET status='skipped',reason='Interrupted before move' WHERE status='queued'")
+        for row in db.execute("SELECT * FROM moves WHERE status IN ('moving','undoing')").fetchall():
+            locations = self._location(row["original"], row), self._location(row["destination"], row)
+            if locations == ("absent", "matches"):
+                status = "moved"
+            elif locations == ("matches", "absent"):
+                status = "undone" if row["status"] == "undoing" else "skipped"
+            else:
+                status = "needs review"
+            db.execute("UPDATE moves SET status=?,reason='Recovered after interruption' WHERE id=?",
+                       (status, row["id"]))
