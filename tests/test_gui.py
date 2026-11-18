@@ -420,7 +420,8 @@ def test_organizer_selection_and_custom_folder(application, tmp_path, monkeypatc
 
 
 def wait_plan(application, page):
-    for worker in list(page.workers):
+    while page.workers:
+        worker = next(iter(page.workers))
         _wait_for_worker(application, worker)
     application.processEvents()
 
