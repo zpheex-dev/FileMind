@@ -105,7 +105,7 @@ def validate(parent, name, expected):
 
 
 def digest(parent, name, expected):
-    validate(parent, name, expected)
+    entry = validate(parent, name, expected)
     if os.name == "nt":
         stream = (parent / name).open("rb")
     else:
@@ -119,7 +119,9 @@ def digest(parent, name, expected):
         after = os.fstat(stream.fileno())
         if signature(after) != expected or after.st_ctime_ns != before.st_ctime_ns:
             raise ValueError("File changed while reading")
-    return value, after.st_ctime_ns
+    # Compare path timestamps to path timestamps. On Windows, stat and
+    # fstat can expose different meanings for ctime on the same NTFS file.
+    return value, entry.st_ctime_ns
 
 
 def rename_new(source, name, destination, target):
