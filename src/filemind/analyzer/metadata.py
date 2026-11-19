@@ -32,6 +32,7 @@ class FileMetadata:
     content_truncated: bool = False
     analysis_error: str | None = None
     modified_at_ns: int | None = None
+    identity: tuple[int, int] | None = None
 
 
 def analyze_file(file_path: str | Path, *, extract_content: bool = True) -> FileMetadata:
@@ -82,6 +83,7 @@ def analyze_file(file_path: str | Path, *, extract_content: bool = True) -> File
         content_truncated=truncated,
         analysis_error="; ".join(errors) if errors else None,
         modified_at_ns=stat.st_mtime_ns,
+        identity=(stat.st_dev, stat.st_ino),
     )
 
 

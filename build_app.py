@@ -10,7 +10,8 @@ def main() -> None:
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
          "--onefile", "--windowed", "--name", "FileMind", "--paths", "src",
-         "--collect-all", "pymupdf", "--specpath", "build/pyinstaller",
+         "--collect-all", "pymupdf", "--add-data",
+         f"{root / 'src/filemind/gui/assets/filemind.svg'}:filemind/gui/assets", "--specpath", "build/pyinstaller",
          "--workpath", "build/pyinstaller/work", "--distpath", "dist",
          "src/filemind/gui/app.py"],
         cwd=root, check=True,

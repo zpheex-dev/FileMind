@@ -1,5 +1,14 @@
 from pathlib import Path
 
+import pytest
+from test_moves import set_test_owner
+
+
+@pytest.fixture(autouse=True)
+def personal_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+
 from filemind.analyzer.metadata import analyze_file
 from filemind.categorizer.classifier import ClassifiedFile, RuleBasedClassifier
 from filemind.organizer.planner import propose_organization
@@ -7,6 +16,11 @@ from filemind.scanner.scanner import scan_directory
 
 
 def classified_scan(root):
+    import os
+    if os.name == "nt":
+        for path in scan_directory(root).files:
+            # Elevated CI uses a group owner for new files.
+            set_test_owner(path)
     classifier = RuleBasedClassifier()
     return [
         ClassifiedFile(metadata, classifier.classify(metadata))
@@ -101,6 +115,6 @@ def test_custom_category_folders_recheck_conflicts_and_validate_names(tmp_path):
     files = classified_scan(tmp_path)
     proposals = propose_organization(tmp_path, files, {"Documents": "My documents"})
     assert {p.destination.parent.name for p in proposals} == {"My documents"}
-    for unsafe in ("../escape", "/absolute", ".", "bad\\name", "bad:folder", "trailing."):
+    for unsafe in ("../escape", "/absolute", ".", "bad\\name", "bad:folder", "trailing.", "bad*name", ".private", "con.txt", "LPT1"):
         with pytest.raises(ValueError):
             propose_organization(tmp_path, files, {"Documents": unsafe})

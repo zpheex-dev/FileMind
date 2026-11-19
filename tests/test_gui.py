@@ -263,7 +263,7 @@ def test_scan_worker_reports_filesystem_errors(tmp_path: Path) -> None:
     assert "Directory not found" in failures.at(0)[1]
 
 
-@pytest.mark.parametrize("change", ["size", "mtime", "missing", "unreadable"])
+@pytest.mark.parametrize("change", ["size", "mtime", "replacement", "missing", "unreadable"])
 def test_preview_refreshes_after_external_change(application, tmp_path, monkeypatch, change):
     original = tmp_path / "a.txt"
     other = tmp_path / "b.txt"
@@ -292,6 +292,11 @@ def test_preview_refreshes_after_external_change(application, tmp_path, monkeypa
         elif change == "mtime":
             original.write_text("new content")
             os.utime(original, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000))
+        elif change == "replacement":
+            replacement = tmp_path / "replacement"
+            replacement.write_text("new content")
+            os.utime(replacement, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+            replacement.replace(original)
         elif change == "missing":
             original.unlink()
         else:
@@ -307,33 +312,37 @@ def test_preview_refreshes_after_external_change(application, tmp_path, monkeypa
         drain()
         text = page._preview.toPlainText()
         assert "old content" not in text
-        assert {"size": "updated longer content", "mtime": "new content",
+        assert {"size": "updated longer content", "mtime": "new content", "replacement": "new content",
                 "missing": "Could not read", "unreadable": "Could not read"}[change] in text
     finally:
         window.close()
 
 
-def test_organizer_replaces_plan_after_completed_scan(application, tmp_path):
+def test_organizer_replaces_plan_after_completed_scan(application, tmp_path, monkeypatch):
+    from test_moves import user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    (first / "report.txt").write_text("report")
+    user_file(first / "report.txt", "report")
     window = MainWindow()
     try:
         page = window._pages["AI Organizer"]
         window._start_scan(first)
         _wait_for_worker(application, window._scan_worker)
-        assert page._tree.topLevelItemCount() == 1
-        row = page._tree.topLevelItem(0)
-        assert row.text(0) == str(first / "report.txt")
-        assert row.text(1) == str(first / "Organized" / "Documents" / "report.txt")
-        assert row.text(3) == "No conflict detected"
+        wait_plan(application, page)
+        assert page.model.rowCount() == 1
+        row = lambda col: page.model.index(0, col).data()
+        assert row(0) == str(first / "report.txt")
+        assert row(1) == str(first / "Organized" / "Documents" / "report.txt")
+        assert row(3) == "No conflict detected"
         assert not (first / "Organized").exists()
         window._start_scan(second)
         _wait_for_worker(application, window._scan_worker)
-        assert page._tree.topLevelItemCount() == 0
-        assert page._proposals == ()
+        wait_plan(application, page)
+        assert page.model.rowCount() == 0
+        assert page.model.rows == ()
     finally:
         window.close()
 
@@ -393,16 +402,136 @@ def test_category_chart_tooltip_identifies_hovered_segment(application, monkeypa
 def test_organizer_selection_and_custom_folder(application, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
 
+    from test_moves import user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     path = tmp_path / "report.txt"
-    path.write_text("report")
+    user_file(path, "report")
     metadata = analyze_file(path, extract_content=False)
-    page = MainWindow()._pages["AI Organizer"]
+    window = MainWindow()
+    page = window._pages["AI Organizer"]
     page.set_scan_result(tmp_path, [ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata))])
+    wait_plan(application, page)
     assert len(page.selected_proposals()) == 1
-    page._tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
+    page.model.setData(page.model.index(0, 0), Qt.Unchecked, Qt.CheckStateRole)
     assert not page.selected_proposals()
     monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("Documents", True))
     monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Paperwork", True))
     page._customize_folder()
-    assert page._proposals[0].destination == tmp_path / "Organized" / "Paperwork" / "report.txt"
+    wait_plan(application, page)
+    assert not page.selected_proposals()
+    assert page.model.rows[0].destination == tmp_path / "Organized" / "Paperwork" / "report.txt"
     assert not (tmp_path / "Organized").exists()
+
+
+def wait_plan(application, page):
+    while page.workers:
+        worker = next(iter(page.workers))
+        _wait_for_worker(application, worker)
+    application.processEvents()
+
+
+def test_old_plan_completion_cannot_replace_new_scan(application, tmp_path):
+    from filemind.gui.pages import OrganizerPage
+
+    page = OrganizerPage()
+    page.set_scan_result(tmp_path, [])
+    old_generation = page.generation
+    page.set_scan_result(tmp_path, [])
+    wait_plan(application, page)
+    page._accept_plan(old_generation, ("obsolete",), "")
+    assert page.model.rowCount() == 0
+
+
+def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from test_moves import user_file
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, message: pytest.fail(f"{title}: {message}"))
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    for name in ("a.txt", "b.txt"):
+        user_file(folder / name, name)
+    history_path = tmp_path / "history.db"
+    window = MainWindow(history_path)
+    window._start_scan(folder)
+    _wait_for_worker(application, window._scan_worker)
+    page = window._pages["AI Organizer"]
+    wait_plan(application, page)
+    page.model.setData(page.model.index(1, 0), Qt.Unchecked, Qt.CheckStateRole)
+    prompts = []
+    responses = iter([QMessageBox.No, QMessageBox.Yes, QMessageBox.Yes])
+
+    def confirm(parent, title, prompt, *args):
+        prompts.append(prompt)
+        return next(responses)
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    page.apply_button.click()
+    assert not history_path.exists() and not (folder / "Organized").exists()
+    page.apply_button.click()
+    _wait_for_worker(application, window._journal_worker)
+    if window._scan_worker is not None:
+        _wait_for_worker(application, window._scan_worker)
+    wait_plan(application, page)
+    assert (folder / "Organized/Documents/a.txt").read_text() == "a.txt"
+    assert (folder / "b.txt").read_text() == "b.txt"
+    assert window.close()
+    reopened = MainWindow(history_path)
+    _wait_for_worker(application, reopened._journal_worker)
+    reopened._buttons["Activity History"].click()
+    history = reopened._pages["Activity History"]
+    history.table.selectRow(0)
+    history.button.click()
+    _wait_for_worker(application, reopened._journal_worker)
+    assert history.model.rows[0]["status"] == "undone"
+    assert (folder / "a.txt").read_text() == "a.txt"
+    assert not (folder / "Organized/Documents/a.txt").exists()
+    assert all("1 selected file" in prompt for prompt in prompts)
+    assert len(prompts) == 3
+    assert reopened.close()
+
+
+def test_map_navigation_and_per_folder_preferences(application, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    from PySide6.QtCore import QSettings
+    from test_moves import user_file
+
+    settings = QSettings(str(tmp_path / "profiles.ini"), QSettings.IniFormat)
+    monkeypatch.setattr("filemind.gui.pages.QSettings", lambda *_: settings)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    user_file(folder / "paper.txt", "document")
+    user_file(folder / "app.py", "code")
+    window = MainWindow(tmp_path / "history.db")
+    window._start_scan(folder)
+    _wait_for_worker(application, window._scan_worker)
+    page = window._pages["AI Organizer"]
+    wait_plan(application, page)
+    dashboard = window._pages["Dashboard"]
+    node = next(b for b in dashboard.map.nodes if b.text().startswith("Documents"))
+    node.click()
+    files = window._pages["My Files"]
+    assert window._stack.currentWidget() is files and files._proxy.rowCount() == 1
+    dashboard.review_button.click()
+    assert window._stack.currentWidget() is page
+    page.select_button.click()
+    assert not page.selected_proposals()
+    page.select_button.click()
+    assert len(page.selected_proposals()) == 2
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: (".py", True))
+    page.exclude_button.click()
+    wait_plan(application, page)
+    assert "1 excluded" in page._summary.text()
+    window.close()
+    reopened = MainWindow(tmp_path / "history.db")
+    reopened._start_scan(folder)
+    _wait_for_worker(application, reopened._scan_worker)
+    page = reopened._pages["AI Organizer"]
+    wait_plan(application, page)
+    assert [r.current_path.name for r in page.selected_proposals()] == ["paper.txt"]
+    page.set_scan_result(tmp_path, [])
+    wait_plan(application, page)
+    assert not page._excluded_types
+    reopened.close()

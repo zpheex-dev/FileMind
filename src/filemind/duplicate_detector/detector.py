@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import stat
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,25 +88,31 @@ def find_duplicates(
             return DuplicateResult((), tuple(issues), files_hashed, True)
 
         try:
-            before = metadata.path.stat()
+            before = metadata.path.stat(follow_symlinks=False)
             if (
                 before.st_size != metadata.size_bytes
                 or (
                     metadata.modified_at_ns is not None
                     and before.st_mtime_ns != metadata.modified_at_ns
                 )
+                or not stat.S_ISREG(before.st_mode)
+                or (metadata.identity is not None and (before.st_dev, before.st_ino) != metadata.identity)
             ):
                 issues.append(
                     DuplicateIssue(
                         metadata.path,
-                        "File size or modification time changed since scanning; skipped.",
+                        "File changed or was replaced since scanning; skipped.",
                     )
                 )
                 continue
 
             digest = hashlib.sha256()
             file_bytes_read = 0
-            with metadata.path.open("rb") as file:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(metadata.path, flags), "rb") as file:
+                opened = os.fstat(file.fileno())
+                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+                    raise OSError("File changed before hashing; skipped.")
                 while True:
                     if cancellation_event is not None and cancellation_event.is_set():
                         return DuplicateResult(
@@ -137,7 +144,7 @@ def find_duplicates(
                         )
                         last_progress_bytes = bytes_hashed
 
-            after = metadata.path.stat()
+            after = metadata.path.stat(follow_symlinks=False)
             if (
                 before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns

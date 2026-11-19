@@ -10,7 +10,7 @@ def navigation_icon(name: str) -> QIcon:
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.scale(2, 2)
-    painter.setPen(QPen(QColor("#70b8b5"), 1.3))
+    painter.setPen(QPen(QColor("#a9a9a9"), 1.3))
     if name == "Dashboard":
         for x, y in ((3, 3), (11, 3), (3, 11), (11, 11)):
             painter.drawRoundedRect(QRectF(x, y, 5, 5), 1, 1)
@@ -28,7 +28,7 @@ def navigation_icon(name: str) -> QIcon:
     elif name == "Settings":
         for x, y in ((5, 7), (10, 13), (15, 8)):
             painter.drawLine(x, 3, x, 17)
-            painter.fillRect(QRectF(x - 2, y - 2, 4, 4), QColor("#10141b"))
+            painter.fillRect(QRectF(x - 2, y - 2, 4, 4), QColor("#141414"))
             painter.drawRect(QRectF(x - 2, y - 2, 4, 4))
     else:
         painter.drawLine(10, 2, 10, 18)

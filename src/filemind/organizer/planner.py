@@ -1,12 +1,14 @@
 """Read-only organization proposals based on a completed, classified scan."""
 
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from filemind.categorizer.classifier import ClassifiedFile
+from filemind.organizer.filesystem import FILE_ERRORS, parent_handle, personal_parts, validate
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,14 @@ def _destination_conflicts(destination: Path, root: Path) -> list[str]:
     return conflicts
 
 
+def validate_folder(folder):
+    if (not folder or folder.startswith(".") or folder.rstrip(" .") != folder
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', folder)
+            or re.fullmatch(r"(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])",
+                            folder.split(".")[0].rstrip(" "), re.IGNORECASE)):
+        raise ValueError("Use a visible folder name valid on both Windows and Linux.")
+
+
 def propose_organization(
     directory: Path, files: Iterable[ClassifiedFile],
     folder_names: dict[str, str] | None = None,
@@ -61,6 +71,7 @@ def propose_organization(
     """
     directory = Path(os.path.abspath(directory))
     organized_root = directory / "Organized"
+    home = Path.home()
     candidates = []
     seen = set()
     for item in files:
@@ -74,18 +85,30 @@ def propose_organization(
         if category in ("", ".", "..") or "/" in category or "\\" in category:
             raise ValueError("Category must be a single folder name")
         folder = (folder_names or {}).get(category, category)
-        if (not folder or folder in (".", "..") or "/" in folder or "\\" in folder
-                or folder.rstrip(" .") != folder or ":" in folder):
-            raise ValueError("Folder name must be a single valid folder name")
+        validate_folder(folder)
         destination = organized_root / folder / source.name
         if source_key == _path_key(destination):
             continue
-        candidates.append((source, destination, item.classification.explanation))
+        candidates.append((source, destination, item))
     counts = Counter(_path_key(destination) for _, destination, _ in candidates)
     proposals = []
-    for source, destination, reason in candidates:
+    for source, destination, item in candidates:
         conflicts = _destination_conflicts(destination, organized_root)
+        try:
+            personal_parts(source, home)
+            record = item.metadata
+            expected = [*(record.identity or (None, None)), record.size_bytes, record.modified_at_ns]
+            with parent_handle(source.parent, home) as parent:
+                validate(parent, source.name, expected)
+            ancestor = destination.parent
+            while ancestor != directory and not ancestor.exists():
+                ancestor = ancestor.parent
+            with parent_handle(ancestor, home):
+                if ancestor.stat().st_dev != expected[0]:
+                    raise ValueError("Destination is on a different filesystem")
+        except FILE_ERRORS as error:
+            conflicts.append(str(error))
         if counts[_path_key(destination)] > 1:
             conflicts.append("Multiple files propose this destination")
-        proposals.append(OrganizationProposal(source, destination, reason, tuple(conflicts)))
+        proposals.append(OrganizationProposal(source, destination, item.classification.explanation, tuple(conflicts)))
     return tuple(proposals)

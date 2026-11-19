@@ -14,26 +14,31 @@ On Linux, download `FileMind-linux-x86_64`, run `chmod +x FileMind-linux-x86_64`
 then launch it. Linux builds are produced on Linux by the release workflow;
 a Windows build cannot run on Linux.
 
-The desktop interface uses Python with Qt/PySide6: compact graphite panels,
-cyan accents, sortable file columns, category filters, and a resizable inspector.
+The desktop workspace uses a monochrome file map. Choose **Scan Downloads** for
+your downloads folder or **Scan folder** for another location. Once the scan
+finishes, choose a category on the map to browse its files or **Review moves** to
+open Organizer. **Scan details** expands the full category breakdown.
+
+Organizer remembers custom category destinations and excluded extensions separately
+for each scanned folder. Exclusions affect move proposals. Excluded types still
+appear in My Files and Duplicate Finder. Select eligible files or clear the selection
+in one click, then review the selected and blocked counts before applying moves.
 
 ## Current status
 
 The PySide6 desktop shell can recursively scan a selected directory in a background
 thread, report progress, and cancel a scan. My Files displays file names, types,
 sizes and modification times. Supported text previews load in a background
-thread when a file is selected. Cached previews are revalidated against size and
-nanosecond modification time on reselection; missing or unreadable files show errors.
+thread when a file is selected. On reselection FileMind checks file identity, size and nanosecond
+modification time. Missing or unreadable files show errors.
 Transparent extension-based classification with explanations is also available.
 The Duplicate Finder uses local SHA-256 hashing to report exact duplicates from
 the latest scan. It hashes only same-size candidates, runs in a background
 thread, and can be cancelled. Recoverable-byte estimates count distinct filesystem
 identities, so hard links do not inflate storage savings. All matching paths remain
 visible. It never deletes or changes files.
-The Organizer page now shows read-only Proposed Organization suggestions from
-the latest completed scan, including explanations and destination conflicts.
-Machine-learning classification, database-backed history, and safe move/undo
-workflows have not been implemented.
+The Organizer suggests destinations from the latest scan. You can apply checked moves
+after confirmation and undo them from Activity History, including after restarting FileMind.
 
 Scanning and analysis are read-only. Directory scans collect metadata without
 extracting every document. The file inventory uses a virtual table model,
@@ -102,14 +107,30 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
 
-Open **AI Organizer** to review **Proposed Organization**. Each file is proposed
+Open **Organizer** to review **Proposed Organization**. Each file is proposed
 for an Organized folder inside the scanned root, then a category folder, retaining
 its filename (for example, Organized/Documents/report.pdf).
 Files already at their destination are omitted. Existing destinations and multiple
 files targeting the same destination are flagged. Unknown extensions go to **Other**.
 A completed scan replaces the plan, including an empty scan; cancelled or failed
 scans retain the previous plan. Conflicts are a snapshot: rescan to refresh them.
-Generating a plan never creates folders, moves, overwrites, or deletes files.
+Previewing a plan leaves files untouched. To try moving files:
+
+1. Scan a personal folder containing a few test files. Open **Organizer**,
+   review destinations and uncheck anything you want to keep in place.
+2. Click **Apply selected moves** and confirm the count. FileMind creates the
+   required folders under `Organized` and checks each file again before moving it.
+3. In **History**, inspect both paths, the status and any skip reason.
+   Select moved rows, click **Undo selected moves** and confirm. You can also
+   do this after restarting FileMind. Empty category folders are retained.
+
+Moves support regular user-owned files within the user profile on the same
+filesystem. Hidden paths, links and system files are excluded. Existing files
+are never overwritten. Undo verifies the recorded identity, size, timestamp and
+SHA-256 digest. If either path conflicts, Activity History explains the reason.
+FileMind stores the journal in `moves.sqlite3` in its per-user application data
+directory. On startup it checks interrupted operations against both paths and
+marks ambiguous results for review without changing files.
 
 ## Standalone executables
 
@@ -125,21 +146,9 @@ The single-file package extracts its runtime at startup, so the first launch
 can take a few seconds. `--smoke-test` opens and automatically closes the app
 for packaging verification.
 
-To build a standalone executable manually for the current operating system, install the
-packaging extra and run PyInstaller from the project folder. PyInstaller builds
-for the operating system where it runs; it does not cross-compile.
-
-```powershell
-python -m pip install ".[build]"
-pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build\pyinstaller --workpath build\pyinstaller\work --distpath dist src\filemind\gui\app.py
-```
-
-On Linux, use the same command with Linux-style paths:
-
-```bash
-python -m pip install ".[build]"
-pyinstaller --noconfirm --clean --onefile --windowed --name FileMind --paths src --collect-all pymupdf --specpath build/pyinstaller --workpath build/pyinstaller/work --distpath dist src/filemind/gui/app.py
-```
+The builder includes the SVG from the checkout. Verify the executable and its
+rendered icon with `dist/FileMind.exe --smoke-test` on Windows or
+`QT_QPA_PLATFORM=offscreen ./dist/FileMind --smoke-test` on Linux.
 
 The Windows output is `dist\FileMind.exe`; the Linux output is `dist/FileMind`.
 The Linux release is named `FileMind-linux-x86_64`. Make it executable, then
