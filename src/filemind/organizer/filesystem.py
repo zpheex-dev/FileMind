@@ -9,6 +9,12 @@ import stat
 import sys
 
 
+FILE_ERRORS = (OSError, ValueError)
+if os.name == "nt":
+    import pywintypes
+    FILE_ERRORS += (pywintypes.error,)
+
+
 def _personal(info):
     if os.name != "nt" and (info.st_uid != os.getuid() or info.st_uid == 0):
         raise PermissionError("Only files and folders owned by the current user can be organized")

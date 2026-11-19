@@ -318,12 +318,14 @@ def test_preview_refreshes_after_external_change(application, tmp_path, monkeypa
         window.close()
 
 
-def test_organizer_replaces_plan_after_completed_scan(application, tmp_path):
+def test_organizer_replaces_plan_after_completed_scan(application, tmp_path, monkeypatch):
+    from test_moves import user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    (first / "report.txt").write_text("report")
+    user_file(first / "report.txt", "report")
     window = MainWindow()
     try:
         page = window._pages["AI Organizer"]
@@ -400,8 +402,10 @@ def test_category_chart_tooltip_identifies_hovered_segment(application, monkeypa
 def test_organizer_selection_and_custom_folder(application, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
 
+    from test_moves import user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     path = tmp_path / "report.txt"
-    path.write_text("report")
+    user_file(path, "report")
     metadata = analyze_file(path, extract_content=False)
     window = MainWindow()
     page = window._pages["AI Organizer"]
@@ -486,3 +490,48 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     assert all("1 selected file" in prompt for prompt in prompts)
     assert len(prompts) == 3
     assert reopened.close()
+
+
+def test_map_navigation_and_per_folder_preferences(application, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    from PySide6.QtCore import QSettings
+    from test_moves import user_file
+
+    settings = QSettings(str(tmp_path / "profiles.ini"), QSettings.IniFormat)
+    monkeypatch.setattr("filemind.gui.pages.QSettings", lambda *_: settings)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    user_file(folder / "paper.txt", "document")
+    user_file(folder / "app.py", "code")
+    window = MainWindow(tmp_path / "history.db")
+    window._start_scan(folder)
+    _wait_for_worker(application, window._scan_worker)
+    page = window._pages["AI Organizer"]
+    wait_plan(application, page)
+    dashboard = window._pages["Dashboard"]
+    node = next(b for b in dashboard.map.nodes if b.text().startswith("Documents"))
+    node.click()
+    files = window._pages["My Files"]
+    assert window._stack.currentWidget() is files and files._proxy.rowCount() == 1
+    dashboard.review_button.click()
+    assert window._stack.currentWidget() is page
+    page.select_button.click()
+    assert not page.selected_proposals()
+    page.select_button.click()
+    assert len(page.selected_proposals()) == 2
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: (".py", True))
+    page.exclude_button.click()
+    wait_plan(application, page)
+    assert "1 excluded" in page._summary.text()
+    window.close()
+    reopened = MainWindow(tmp_path / "history.db")
+    reopened._start_scan(folder)
+    _wait_for_worker(application, reopened._scan_worker)
+    page = reopened._pages["AI Organizer"]
+    wait_plan(application, page)
+    assert [r.current_path.name for r in page.selected_proposals()] == ["paper.txt"]
+    page.set_scan_result(tmp_path, [])
+    wait_plan(application, page)
+    assert not page._excluded_types
+    reopened.close()

@@ -8,14 +8,22 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
-from filemind.organizer.filesystem import digest, move, parent_handle, personal_parts
+from filemind.organizer.filesystem import FILE_ERRORS, digest, move, parent_handle, personal_parts
 
 LOGGER = logging.getLogger(__name__)
 
-FILE_ERRORS = (OSError, ValueError)
-if os.name == "nt":
-    import pywintypes
-    FILE_ERRORS += (pywintypes.error,)
+def _stored_text(text):
+    # SQLite TEXT requires UTF-8. Preserve other POSIX filenames as raw bytes.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return os.fsencode(text)
+    return text
+
+
+def _journal_row(cursor, values):
+    return sqlite3.Row(cursor, tuple(os.fsdecode(value) if isinstance(value, bytes) else value
+                                     for value in values))
 
 
 class JournalBusyError(RuntimeError):
@@ -30,7 +38,7 @@ class MoveJournal:
     def _connect(self):
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         db = sqlite3.connect(self.database, timeout=30)
-        db.row_factory = sqlite3.Row
+        db.row_factory = _journal_row
         db.execute("""CREATE TABLE IF NOT EXISTS moves (
             id INTEGER PRIMARY KEY, batch TEXT NOT NULL, root TEXT NOT NULL,
             original TEXT NOT NULL, destination TEXT NOT NULL, signature TEXT NOT NULL,
@@ -78,7 +86,8 @@ class MoveJournal:
             source = proposal.current_path
             record = metadata[source]
             expected = [*(record.identity or (None, None)), record.size_bytes, record.modified_at_ns]
-            rows.append((batch, str(root), str(source), str(proposal.destination), json.dumps(expected)))
+            rows.append((batch, _stored_text(str(root)), _stored_text(str(source)),
+                         _stored_text(str(proposal.destination)), json.dumps(expected)))
         with self._session() as db:
             with db:
                 db.executemany("""INSERT INTO moves(batch,root,original,destination,signature,status)
@@ -90,7 +99,7 @@ class MoveJournal:
                     LOGGER.warning("Skipping %s: %s", row["original"], error)
                     with db:
                         db.execute("UPDATE moves SET status='skipped',reason=? WHERE id=? AND status='queued'",
-                                   (str(error), row["id"]))
+                                   (_stored_text(str(error)), row["id"]))
                     continue
                 with db:
                     db.execute("UPDATE moves SET status='moving',checksum=? WHERE id=? AND status='queued'",
@@ -125,7 +134,7 @@ class MoveJournal:
                 LOGGER.warning("%s: %s", row["original"], reason)
             else:
                 status, reason = ("undone" if undo else "moved"), ""
-            db.execute("UPDATE moves SET status=?,reason=? WHERE id=?", (status, reason, entry_id))
+            db.execute("UPDATE moves SET status=?,reason=? WHERE id=?", (status, _stored_text(reason), entry_id))
 
     def _location(self, path, row):
         try:

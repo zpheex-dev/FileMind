@@ -215,3 +215,17 @@ def test_hard_links_count_storage_once_but_preserve_paths(tmp_path):
     result = find_duplicates([analyze_file(p) for p in (first, link, copy)])
     assert set(result.groups[0].files) == {first, link, copy}
     assert result.groups[0].redundant_bytes == len(b"same content")
+
+
+def test_replaced_candidate_with_preserved_timestamp(tmp_path):
+    import os
+    paths = [tmp_path / name for name in ("one", "two", "replacement")]
+    for path in paths:
+        path.write_bytes(b"same")
+    metadata = [analyze_file(path) for path in paths[:2]]
+    paths[2].replace(paths[1])
+    timestamp = metadata[1].modified_at_ns
+    os.utime(paths[1], ns=(timestamp, timestamp))
+    result = find_duplicates(metadata)
+    assert not result.groups and result.files_hashed == 1
+    assert [issue.path for issue in result.issues] == paths[1:2]

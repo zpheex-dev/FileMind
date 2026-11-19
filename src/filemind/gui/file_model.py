@@ -1,7 +1,6 @@
 """Virtual file table: values are computed only for visible cells."""
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor
 
 
 def format_size(size):
@@ -46,8 +45,6 @@ class FileTableModel(QAbstractTableModel):
         column = index.column()
         if role == Qt.ItemDataRole.ToolTipRole:
             return decision.explanation if column in (4, 5) else str(metadata.path)
-        if role == Qt.ItemDataRole.ForegroundRole and column == 4:
-            return QColor("#53dfcd")
         if role == Qt.ItemDataRole.UserRole:
             if column == 2:
                 return metadata.size_bytes if metadata.size_bytes is not None else -1

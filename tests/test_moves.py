@@ -12,6 +12,10 @@ from filemind.organizer.planner import propose_organization
 
 def user_file(path, content):
     path.write_text(content)
+    set_test_owner(path)
+
+
+def set_test_owner(path):
     if os.name == "nt":
         # Elevated CI accounts can default new files to the Administrators group.
         import win32api
@@ -143,7 +147,8 @@ def test_protected_paths_and_conflicts(workspace):
     record = classified(path)
     protected = propose_organization(root, [record])[0]
     metadata[path] = record.metadata
-    journal.apply(root, [protected, replace(rows[0], conflicts=("conflict",))], metadata)
+    assert protected.has_conflict
+    journal.apply(root, [replace(protected, conflicts=()), replace(rows[0], conflicts=("conflict",))], metadata)
     assert len(journal.history()) == 1 and journal.history()[0]["status"] == "skipped"
     assert path.read_text() == "private" and not (root / "Organized").exists()
 
@@ -198,3 +203,18 @@ def test_second_instance_cannot_reconcile_live_batch(workspace, monkeypatch):
     monkeypatch.setattr(filesystem, "rename_new", reopen_during_move)
     journal.apply(root, rows, metadata)
     assert all(row["status"] == "moved" for row in journal.history())
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX byte filenames")
+def test_mixed_encoding_batch_round_trips_through_history(workspace):
+    journal, root, _, _ = workspace
+    paths = [root / os.fsdecode(b"notes-\xff.txt"), root / "a.txt"]
+    paths[0].write_bytes(b"notes")
+    items = [classified(path) for path in paths]
+    plan = propose_organization(root, items)
+    journal.apply(root, plan, {item.metadata.path: item.metadata for item in items})
+    reopened = MoveJournal(journal.database)
+    rows = reopened.history()
+    assert {Path(row["original"]) for row in rows} == set(paths)
+    assert all(row["status"] == "moved" for row in rows)
+    reopened.undo([row["id"] for row in rows])
+    assert paths[0].read_bytes() == b"notes" and paths[1].read_text() == "a.txt"

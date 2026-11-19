@@ -14,8 +14,15 @@ On Linux, download `FileMind-linux-x86_64`, run `chmod +x FileMind-linux-x86_64`
 then launch it. Linux builds are produced on Linux by the release workflow;
 a Windows build cannot run on Linux.
 
-The desktop interface uses Python with Qt/PySide6: compact graphite panels,
-cyan accents, sortable file columns, category filters, and a resizable inspector.
+The desktop workspace uses a monochrome file map. Choose **Scan Downloads** for
+your downloads folder or **Scan folder** for another location. Once the scan
+finishes, choose a category on the map to browse its files or **Review moves** to
+open Organizer. **Scan details** expands the full category breakdown.
+
+Organizer remembers custom category destinations and excluded extensions separately
+for each scanned folder. Exclusions affect move proposals. Excluded types still
+appear in My Files and Duplicate Finder. Select eligible files or clear the selection
+in one click, then review the selected and blocked counts before applying moves.
 
 ## Current status
 
@@ -100,7 +107,7 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
 
-Open **AI Organizer** to review **Proposed Organization**. Each file is proposed
+Open **Organizer** to review **Proposed Organization**. Each file is proposed
 for an Organized folder inside the scanned root, then a category folder, retaining
 its filename (for example, Organized/Documents/report.pdf).
 Files already at their destination are omitted. Existing destinations and multiple
@@ -109,11 +116,11 @@ A completed scan replaces the plan, including an empty scan; cancelled or failed
 scans retain the previous plan. Conflicts are a snapshot: rescan to refresh them.
 Previewing a plan leaves files untouched. To try moving files:
 
-1. Scan a personal folder containing a few test files. Open **AI Organizer**,
+1. Scan a personal folder containing a few test files. Open **Organizer**,
    review destinations and uncheck anything you want to keep in place.
 2. Click **Apply selected moves** and confirm the count. FileMind creates the
    required folders under `Organized` and checks each file again before moving it.
-3. In **Activity History**, inspect both paths, the status and any skip reason.
+3. In **History**, inspect both paths, the status and any skip reason.
    Select moved rows, click **Undo selected moves** and confirm. You can also
    do this after restarting FileMind. Empty category folders are retained.
 

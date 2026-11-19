@@ -1,11 +1,14 @@
 """Page layouts for the FileMind desktop shell."""
 
 from collections.abc import Callable
+import hashlib
+import json
+import os
 from collections import Counter
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSortFilterProxyModel, QTimer, QRectF, QEvent
+from PySide6.QtCore import Qt, Signal, QSortFilterProxyModel, QTimer, QRectF, QEvent, QSettings
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemind.gui.network import FileMap
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel
@@ -47,8 +51,8 @@ from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateRes
 
 
 CATEGORY_COLORS = (
-    "#53dfcd", "#79aaff", "#f4ba70", "#d69cf0", "#e88698",
-    "#9bcf84", "#eed779", "#76c6dc", "#b6a5a0", "#bdc9d5",
+    "#c0c0c0", "#a6a6a6", "#c1c1c1", "#aeaeae", "#9c9c9c",
+    "#bfbfbf", "#d5d5d5", "#b7b7b7", "#a8a8a8", "#c7c7c7",
 )
 
 
@@ -115,7 +119,7 @@ class CategoryChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self._chart_rect()
-        pen = QPen(QColor("#293743"), 18)
+        pen = QPen(QColor("#353535"), 18)
         painter.setPen(pen)
         painter.drawEllipse(rect)
         total = sum(self._counts.values())
@@ -129,13 +133,16 @@ class CategoryChart(QWidget):
                 painter.setPen(pen)
                 painter.drawArc(rect, start - used, -span)
                 used += span
-        painter.setPen(QColor("#e3edf7"))
+        painter.setPen(QColor("#ececec"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
                          f"{total:,}\nfiles" if total else "No files")
 
 
 class DashboardPage(QWidget):
     scan_requested = Signal()
+    downloads_requested = Signal()
+    category_requested = Signal(str)
+    review_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -143,39 +150,38 @@ class DashboardPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 24)
         layout.setSpacing(18)
 
-        layout.addWidget(self._build_welcome_card())
-        layout.addLayout(self._build_metrics())
-        layout.addLayout(self._build_overview_cards())
-        layout.addWidget(self._build_distribution_details())
-        layout.addStretch(1)
-
-    def _build_welcome_card(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("WelcomeCard")
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(18)
-
-        text_layout = QVBoxLayout()
-        text_layout.setSpacing(7)
-        title = QLabel("Your filesystem. In focus.")
+        card = SurfaceCard()
+        toolbar = QHBoxLayout()
+        self.map_title = title = QLabel("File map")
         title.setObjectName("WelcomeTitle")
-        description = QLabel(
-            "Map your folders, inspect content, and find exact duplicates. All processing stays local. File moves require "
-            "your review and confirmation."
-        )
-        description.setObjectName("MutedText")
-        description.setWordWrap(True)
-        text_layout.addWidget(title)
-        text_layout.addWidget(description)
-
-        self._scan_button = QPushButton("Scan a folder")
+        toolbar.addWidget(title)
+        toolbar.addStretch()
+        self._scan_button = QPushButton("Scan Downloads")
         self._scan_button.setObjectName("PrimaryButton")
-        self._scan_button.clicked.connect(self.scan_requested.emit)
-
-        layout.addLayout(text_layout, 1)
-        layout.addWidget(self._scan_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        return card
+        self._scan_button.clicked.connect(self.downloads_requested)
+        toolbar.addWidget(self._scan_button)
+        self.review_button = QPushButton("Review moves")
+        self.review_button.clicked.connect(self.review_requested)
+        self.review_button.setEnabled(False)
+        toolbar.addWidget(self.review_button)
+        card.content_layout.addLayout(toolbar)
+        self.map = FileMap()
+        self.map.category_requested.connect(self.category_requested)
+        card.content_layout.addWidget(self.map)
+        layout.addWidget(card)
+        layout.addLayout(self._build_metrics())
+        details = QWidget()
+        detail_layout = QVBoxLayout(details)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.addLayout(self._build_overview_cards())
+        detail_layout.addWidget(self._build_distribution_details())
+        toggle = QPushButton("Scan details")
+        toggle.setCheckable(True)
+        toggle.toggled.connect(details.setVisible)
+        details.hide()
+        layout.addWidget(toggle)
+        layout.addWidget(details)
+        layout.addStretch(1)
 
     def _build_metrics(self) -> QHBoxLayout:
         layout = QHBoxLayout()
@@ -268,6 +274,10 @@ class DashboardPage(QWidget):
         issue_count: int,
     ) -> None:
         self._scan_button.setEnabled(True)
+        self.map_title.setText(directory.name or str(directory))
+        self.map_title.setToolTip(str(directory))
+        self.map.setAccessibleDescription(f"Files in {directory}. Choose a category to browse.")
+        self.map.setToolTip(str(directory))
         self._metric_cards[0].set_value(str(len(files)), f"in {directory.name}")
         sizes = [
             item.metadata.size_bytes
@@ -291,6 +301,8 @@ class DashboardPage(QWidget):
             entry = self._distribution_layout.takeAt(0)
             if entry.widget():
                 entry.widget().deleteLater()
+        self.map.set_counts(category_counts)
+        self.review_button.setEnabled(bool(files))
         self._category_chart.set_counts(category_counts.most_common())
         if not files:
             empty = QLabel("No files found in the latest scan.")
@@ -595,7 +607,16 @@ class OrganizerPage(QWidget):
         self._folder_button.setEnabled(False)
         self._folder_button.clicked.connect(self._customize_folder)
         controls.addWidget(self._folder_button)
+        self.exclude_button = QPushButton("Exclude types…")
+        self.exclude_button.setEnabled(False)
+        self.exclude_button.clicked.connect(self._edit_exclusions)
+        controls.addWidget(self.exclude_button)
+        self.select_button = QPushButton("Clear selection")
+        self.select_button.setEnabled(False)
+        self.select_button.clicked.connect(self._toggle_selection)
+        controls.addWidget(self.select_button)
         self.apply_button = QPushButton("Apply selected moves")
+        self.apply_button.setObjectName("PrimaryButton")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested)
         controls.addWidget(self.apply_button)
@@ -609,9 +630,12 @@ class OrganizerPage(QWidget):
         self.table.horizontalHeader().setDefaultSectionSize(240)
         card.content_layout.addWidget(self.table)
         layout.addWidget(card)
+        self._excluded_count = 0
         self.generation = 0
         self.workers = set()
         self._folder_names = {}
+        self._excluded_types = set()
+        self._settings = QSettings("FileMind", "FolderProfiles")
         self._directory = None
         self._files = []
 
@@ -637,11 +661,41 @@ class OrganizerPage(QWidget):
             QMessageBox.warning(self, "Invalid folder name", str(error))
             return
         self._folder_names = updated
+        self._save_profile()
         self._build_plan()
 
+    def _profile_key(self):
+        path = os.fsencode(os.path.normcase(str(self._directory)))
+        return "folders/" + hashlib.sha256(path).hexdigest()
+
+    def _save_profile(self):
+        self._settings.setValue(self._profile_key(), json.dumps({
+            "folders": self._folder_names, "excluded": sorted(self._excluded_types)
+        }))
+
+    def _edit_exclusions(self):
+        text, ok = QInputDialog.getText(self, "Organizer exclusions",
+            "Skip these file extensions in this folder (comma-separated):",
+            text=", ".join(sorted(self._excluded_types)))
+        if ok:
+            self._excluded_types = {part.strip().lower().lstrip(".") for part in text.split(",") if part.strip().lstrip(".")}
+            self._save_profile()
+            self._build_plan()
+
+    def _toggle_selection(self):
+        if self.selected_proposals():
+            self.model.unchecked.update(row.current_path for row in self.model.rows if not row.has_conflict)
+        else:
+            self.model.unchecked.difference_update(row.current_path for row in self.model.rows if not row.has_conflict)
+        self.model.replace(self.model.rows)
+
     def _update_apply(self):
-        self.apply_button.setEnabled(any(not row.has_conflict and row.current_path not in self.model.unchecked
-                                         for row in self.model.rows))
+        selected = len(self.selected_proposals())
+        self.apply_button.setEnabled(bool(selected))
+        self.select_button.setEnabled(any(not row.has_conflict for row in self.model.rows))
+        self.select_button.setText("Clear selection" if selected else "Select eligible")
+        blocked = sum(row.has_conflict for row in self.model.rows)
+        self._summary.setText(f"{selected:,} selected   ·   {blocked:,} blocked   ·   {self._excluded_count:,} excluded")
 
     def selected_proposals(self):
         return tuple(row for row in self.model.rows
@@ -651,14 +705,24 @@ class OrganizerPage(QWidget):
         if directory != self._directory:
             self.model.unchecked.clear()
         self._directory, self._files = directory, files
+        try:
+            profile = json.loads(self._settings.value(self._profile_key(), "{}"))
+            self._folder_names = dict(profile.get("folders", {}))
+            self._excluded_types = set(profile.get("excluded", []))
+        except (ValueError, TypeError, AttributeError):
+            self._folder_names, self._excluded_types = {}, set()
+        self.exclude_button.setEnabled(bool(files))
         self._folder_button.setEnabled(bool(files))
         self._build_plan()
 
     def _build_plan(self):
         self.generation += 1
+        included = [item for item in self._files
+                    if item.metadata.extension.lstrip(".").lower() not in self._excluded_types]
+        self._excluded_count = len(self._files) - len(included)
         self.model.replace(())
         self._summary.setText("Checking destinations…")
-        worker = PlanWorker(self.generation, self._directory, self._files, dict(self._folder_names), self)
+        worker = PlanWorker(self.generation, self._directory, included, dict(self._folder_names), self)
         self.workers.add(worker)
         worker.ready.connect(self._accept_plan)
         worker.finished.connect(self._worker_finished)
@@ -672,7 +736,8 @@ class OrganizerPage(QWidget):
     def _accept_plan(self, generation, rows, error):
         if generation == self.generation:
             self.model.replace(rows)
-            self._summary.setText(error or f"{len(rows):,} proposed moves")
+            if error:
+                self._summary.setText(error)
 
 
 
@@ -829,36 +894,12 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 24)
         layout.setSpacing(16)
 
-        privacy_card = SurfaceCard()
-        add_card_heading(
-            privacy_card.content_layout,
-            "Privacy",
-            "FileMind is designed to keep file analysis on this device.",
-        )
-        privacy_card.content_layout.addWidget(
-            EmptyState(
-                "Local-first by design",
-                "No file upload or cloud processing is configured. Privacy controls will be expanded as analysis features are implemented.",
-                icon="⌂",
-            )
-        )
-
-        preferences_card = SurfaceCard()
-        add_card_heading(
-            preferences_card.content_layout,
-            "Scan preferences",
-            "Scanning runs locally. Configurable exclusions and file types are planned.",
-        )
-        preferences_card.content_layout.addWidget(
-            EmptyState(
-                "No preferences to configure yet",
-                "Excluded folders, supported file types, and classification options are planned.",
-                icon="⚙",
-            )
-        )
-
-        layout.addWidget(privacy_card)
-        layout.addWidget(preferences_card)
+        card = SurfaceCard()
+        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.1.0")
+        note = QLabel("Scans and exact duplicate checks run on this device. Review moves in Organizer and restore them from History.")
+        note.setWordWrap(True)
+        card.content_layout.addWidget(note)
+        layout.addWidget(card)
         layout.addStretch(1)
 
 

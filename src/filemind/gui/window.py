@@ -46,8 +46,10 @@ PAGE_DESCRIPTIONS = {
     "AI Organizer": "Review suggested destinations before anything changes.",
     "Duplicate Finder": "Find exact copies and review their storage impact.",
     "Activity History": "Review completed operations and safely undo moves.",
-    "Settings": "Control scan preferences and privacy options.",
+    "Settings": "Version and local processing details.",
 }
+
+PAGE_LABELS = {"Dashboard": "Overview", "AI Organizer": "Organizer", "Activity History": "History", "Settings": "About"}
 
 NAV_ITEMS = (
     ("Dashboard", "⌂"),
@@ -68,7 +70,7 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         root.setObjectName("AppRoot")
-        root_layout = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
@@ -95,73 +97,24 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setMinimumWidth(190)
-        sidebar.setMaximumWidth(210)
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(16, 20, 16, 18)
-        layout.setSpacing(8)
-
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
-        brand_mark = QLabel("F")
-        brand_mark.setObjectName("BrandMark")
-        brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_mark.setFixedSize(38, 38)
-        brand_text = QVBoxLayout()
-        brand_text.setSpacing(0)
-        brand_name = QLabel("FileMind")
-        brand_name.setObjectName("BrandName")
-        brand_caption = QLabel("LOCAL FILE WORKSPACE")
-        brand_caption.setObjectName("BrandCaption")
-        brand_text.addWidget(brand_name)
-        brand_text.addWidget(brand_caption)
-        brand_row.addWidget(brand_mark)
-        brand_row.addLayout(brand_text, 1)
-        layout.addLayout(brand_row)
-        layout.addSpacing(20)
-
-        section = QLabel("WORKSPACE")
-        section.setObjectName("SectionCaption")
-        section.setContentsMargins(10, 0, 0, 6)
-        layout.addWidget(section)
-
-        for title, icon in NAV_ITEMS:
-            button = QPushButton(title)
+        layout = QHBoxLayout(sidebar)
+        layout.setContentsMargins(24, 10, 24, 10)
+        layout.setSpacing(4)
+        brand = QLabel("FileMind")
+        brand.setObjectName("BrandName")
+        layout.addWidget(brand)
+        layout.addSpacing(24)
+        for title, _ in NAV_ITEMS:
+            button = QPushButton(PAGE_LABELS.get(title, title))
             button.setIcon(navigation_icon(title))
-            button.setIconSize(QSize(18, 18))
-            if title == "Settings":
-                button.setToolTip("Planned feature — interface preview")
+            button.setIconSize(QSize(17, 17))
             button.setObjectName("NavButton")
             button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(
-                lambda checked=False, page_name=title: self._show_page(page_name)
-            )
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, name=title: self._show_page(name))
             self._buttons[title] = button
             layout.addWidget(button)
-
-        layout.addStretch(1)
-
-        privacy_card = QFrame()
-        privacy_card.setObjectName("SurfaceCard")
-        privacy_layout = QVBoxLayout(privacy_card)
-        privacy_layout.setContentsMargins(13, 13, 13, 13)
-        privacy_layout.setSpacing(6)
-        privacy_title = QLabel("Privacy first")
-        privacy_title.setObjectName("CardTitle")
-        privacy_description = QLabel(
-            "Built for local processing. Your files stay under your control."
-        )
-        privacy_description.setObjectName("MutedText")
-        privacy_description.setWordWrap(True)
-        privacy_layout.addWidget(privacy_title)
-        privacy_layout.addWidget(privacy_description)
-        layout.addWidget(privacy_card)
-
-        version = QLabel("FILEMIND  ·  EARLY ACCESS")
-        version.setObjectName("BrandCaption")
-        version.setContentsMargins(4, 10, 0, 0)
-        layout.addWidget(version)
+        layout.addStretch()
         return sidebar
 
     def _build_content(self) -> QWidget:
@@ -190,6 +143,9 @@ class MainWindow(QMainWindow):
         dashboard = self._pages["Dashboard"]
         if isinstance(dashboard, DashboardPage):
             dashboard.scan_requested.connect(self._choose_directory)
+            dashboard.downloads_requested.connect(self._scan_downloads)
+            dashboard.category_requested.connect(self._browse_category)
+            dashboard.review_requested.connect(lambda: self._show_page("AI Organizer"))
         duplicate_page = self._pages["Duplicate Finder"]
         if isinstance(duplicate_page, DuplicateFinderPage):
             duplicate_page.find_requested.connect(self._handle_duplicate_button)
@@ -229,6 +185,8 @@ class MainWindow(QMainWindow):
         self._scan_button = QPushButton("Scan folder")
         self._scan_button.setObjectName("PrimaryButton")
         self._scan_button.clicked.connect(self._handle_scan_button)
+        self._scan_button.setShortcut("Ctrl+O")
+        self._scan_button.setToolTip("Choose a folder or cancel the current scan (Ctrl+O)")
         layout.addWidget(self._status_badge)
         layout.addWidget(self._progress_bar)
         layout.addWidget(self._scan_button)
@@ -237,7 +195,7 @@ class MainWindow(QMainWindow):
     def _show_page(self, page_name: str) -> None:
         page = self._pages[page_name]
         self._stack.setCurrentWidget(page)
-        self._header_title.setText(page_name)
+        self._header_title.setText(PAGE_LABELS.get(page_name, page_name))
         self._header_subtitle.setText(PAGE_DESCRIPTIONS[page_name])
         for name, button in self._buttons.items():
             button.setChecked(name == page_name)
@@ -284,6 +242,19 @@ class MainWindow(QMainWindow):
             if directory is not None:
                 self._start_scan(directory)
         worker.deleteLater()
+
+    def _browse_category(self, category):
+        page = self._pages["My Files"]
+        page._search.clear()
+        page._category_filter.setCurrentText(category)
+        self._show_page("My Files")
+
+    def _scan_downloads(self):
+        location = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
+        if location and Path(location).is_dir():
+            self._start_scan(Path(location))
+        else:
+            self._choose_directory()
 
     def _choose_directory(self) -> None:
         if self._scan_worker is not None or self._duplicate_worker is not None:
