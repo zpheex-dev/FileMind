@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from filemind.gui.theme import fixed_font
 from filemind.gui.icons import navigation_icon
 
 
@@ -52,6 +53,7 @@ class MetricCard(SurfaceCard):
 
         label_widget = QLabel(label.upper())
         label_widget.setObjectName("MetricLabel")
+        label_widget.setFont(fixed_font())
         self.value_widget = QLabel(value)
         self.value_widget.setObjectName("MetricValue")
         self.note_widget = QLabel(note)

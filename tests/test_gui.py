@@ -70,9 +70,16 @@ def test_sorted_filtered_selection_previews_the_correct_file(application, tmp_pa
     window.close()
 
 
-@pytest.fixture(scope="session")
-def application() -> QApplication:
-    return QApplication.instance() or QApplication([])
+@pytest.fixture
+def application():
+    from PySide6.QtCore import QCoreApplication, QEvent
+    app = QApplication.instance() or QApplication([])
+    yield app
+    for widget in app.topLevelWidgets():
+        if isinstance(widget, MainWindow):
+            widget.close()
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def _wait_for_worker(application: QApplication, worker: QThread) -> None:
@@ -134,7 +141,7 @@ def test_scan_updates_dashboard_and_file_explorer(
 
     assert window._scan_worker is None
     assert window._scan_button.isEnabled()
-    assert window._scan_button.text() == "Scan folder"
+    assert window._scan_button.text() == "Choose folder"
     assert not window._progress_bar.isVisible()
     files_page = window._pages["My Files"]
     dashboard = window._pages["Dashboard"]
@@ -334,8 +341,8 @@ def test_organizer_replaces_plan_after_completed_scan(application, tmp_path, mon
         wait_plan(application, page)
         assert page.model.rowCount() == 1
         row = lambda col: page.model.index(0, col).data()
-        assert row(0) == str(first / "report.txt")
-        assert row(1) == str(first / "Organized" / "Documents" / "report.txt")
+        assert row(0) == "report.txt"
+        assert row(1) == str(Path("Organized") / "Documents" / "report.txt")
         assert row(3) == "No conflict detected"
         assert not (first / "Organized").exists()
         window._start_scan(second)
@@ -463,10 +470,13 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     prompts = []
     responses = iter([QMessageBox.No, QMessageBox.Yes, QMessageBox.Yes])
 
-    def confirm(parent, title, prompt, *args):
-        prompts.append(prompt)
-        return next(responses)
-    monkeypatch.setattr(QMessageBox, "question", confirm)
+    def confirm(dialog):
+        prompts.append(dialog.text())
+        role = QMessageBox.AcceptRole if next(responses) == QMessageBox.Yes else QMessageBox.RejectRole
+        QTimer.singleShot(0, next(button for button in dialog.buttons() if dialog.buttonRole(button) == role).click)
+        return real_exec(dialog)
+    real_exec = QMessageBox.exec
+    monkeypatch.setattr(QMessageBox, "exec", confirm)
     page.apply_button.click()
     assert not history_path.exists() and not (folder / "Organized").exists()
     page.apply_button.click()
@@ -481,7 +491,8 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     _wait_for_worker(application, reopened._journal_worker)
     reopened._buttons["Activity History"].click()
     history = reopened._pages["Activity History"]
-    history.table.selectRow(0)
+    assert history.selected_ids() == [history.model.rows[0]["id"]]
+    assert history.button.isEnabled()
     history.button.click()
     _wait_for_worker(application, reopened._journal_worker)
     assert history.model.rows[0]["status"] == "undone"

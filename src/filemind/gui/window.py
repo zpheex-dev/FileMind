@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from filemind.analyzer.metadata import FileMetadata
+from filemind.gui.theme import fixed_font
 from filemind.gui.components import StatusBadge
 from filemind.gui.icons import navigation_icon
 from filemind.categorizer.classifier import ClassifiedFile
@@ -49,7 +51,7 @@ PAGE_DESCRIPTIONS = {
     "Settings": "Version and local processing details.",
 }
 
-PAGE_LABELS = {"Dashboard": "Overview", "AI Organizer": "Organizer", "Activity History": "History", "Settings": "About"}
+PAGE_LABELS = {"Dashboard": "Overview", "AI Organizer": "Organizer", "Activity History": "History && undo", "Settings": "About"}
 
 NAV_ITEMS = (
     ("Dashboard", "⌂"),
@@ -61,11 +63,18 @@ NAV_ITEMS = (
 )
 
 
+class WorkspacePages(QStackedWidget):
+    """Let the scroll area size itself to the visible stage."""
+    def minimumSizeHint(self):
+        page = self.currentWidget()
+        return page.minimumSizeHint() if page is not None else QSize(0, 0)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, history_path=None) -> None:
         super().__init__()
         self.setWindowTitle("FileMind")
-        self.setMinimumSize(980, 680)
+        self.setMinimumSize(760, 530)
         self.resize(1280, 820)
 
         root = QWidget()
@@ -76,7 +85,8 @@ class MainWindow(QMainWindow):
 
         self._buttons: dict[str, QPushButton] = {}
         self._pages: dict[str, QWidget] = {}
-        self._stack = QStackedWidget()
+        self._stack = WorkspacePages()
+        self._stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self._scan_worker: DirectoryScanWorker | None = None
         self._duplicate_worker: DuplicateScanWorker | None = None
         self._scan_files: list[FileMetadata] = []
@@ -86,24 +96,37 @@ class MainWindow(QMainWindow):
             history_path = Path(location) / "moves.sqlite3"
         self._journal = MoveJournal(history_path)
         self._journal_worker = None
-        root_layout.addWidget(self._build_sidebar())
-        root_layout.addWidget(self._build_content(), 1)
+        root_layout.addWidget(self._build_header())
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        self.rail = self._build_sidebar()
+        body.addWidget(self.rail)
+        body.addWidget(self._build_content(), 1)
+        root_layout.addLayout(body, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage("LOCAL WORKSPACE   /   Ready")
         self._show_page("Dashboard")
         if self._journal.database.exists():
             self._run_journal("reconcile")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        narrow = event.size().width() < 940
+        self.rail.setFixedWidth(96 if narrow else 162)
+        for name, button in self._buttons.items():
+            label = PAGE_LABELS.get(name, name)
+            compact = "Undo" if name == "Activity History" else ""
+            button.setText(compact if narrow else label)
+            button.setToolTip(label.replace("&&", "&"))
+            button.setAccessibleName(label.replace("&&", "&"))
+
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        layout = QHBoxLayout(sidebar)
-        layout.setContentsMargins(24, 10, 24, 10)
+        sidebar.setFixedWidth(162)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(8, 24, 8, 12)
         layout.setSpacing(4)
-        brand = QLabel("FileMind")
-        brand.setObjectName("BrandName")
-        layout.addWidget(brand)
-        layout.addSpacing(24)
         for title, _ in NAV_ITEMS:
             button = QPushButton(PAGE_LABELS.get(title, title))
             button.setIcon(navigation_icon(title))
@@ -123,7 +146,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._build_header())
+
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -164,13 +187,20 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(header)
         layout.setContentsMargins(30, 13, 30, 13)
 
+        brand = QLabel("FileMind")
+        brand.setObjectName("BrandName")
+        layout.addWidget(brand)
+        layout.addSpacing(20)
         heading_layout = QVBoxLayout()
         heading_layout.setSpacing(2)
         self._header_title = QLabel()
         self._header_title.setObjectName("HeaderTitle")
         self._header_subtitle = QLabel()
         self._header_subtitle.setObjectName("HeaderSubtitle")
-        self._header_subtitle.setWordWrap(True)
+        self._header_subtitle.setFont(fixed_font())
+        self._header_subtitle.setMinimumWidth(0)
+        self._header_subtitle.setTextFormat(Qt.PlainText)
+        self._header_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         heading_layout.addWidget(self._header_title)
         heading_layout.addWidget(self._header_subtitle)
         layout.addLayout(heading_layout, 1)
@@ -182,7 +212,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFixedWidth(110)
         self._progress_bar.setMaximumHeight(8)
         self._progress_bar.hide()
-        self._scan_button = QPushButton("Scan folder")
+        self._scan_button = QPushButton("Choose folder")
         self._scan_button.setObjectName("PrimaryButton")
         self._scan_button.clicked.connect(self._handle_scan_button)
         self._scan_button.setShortcut("Ctrl+O")
@@ -195,15 +225,28 @@ class MainWindow(QMainWindow):
     def _show_page(self, page_name: str) -> None:
         page = self._pages[page_name]
         self._stack.setCurrentWidget(page)
-        self._header_title.setText(PAGE_LABELS.get(page_name, page_name))
-        self._header_subtitle.setText(PAGE_DESCRIPTIONS[page_name])
+        self._stack.updateGeometry()
+        self._header_title.setText(PAGE_LABELS.get(page_name, page_name).replace("&&", "&"))
+        directory = self._pages["AI Organizer"]._directory
+        self._header_subtitle.setText(str(directory) if directory else "Local workspace")
+        self._header_subtitle.setToolTip(str(directory or ""))
         for name, button in self._buttons.items():
             button.setChecked(name == page_name)
 
     def _confirm_moves(self, verb, count):
-        prompt = f"{verb} {count:,} selected file move(s)?"
-        return QMessageBox.question(self, verb + " selected moves", prompt, QMessageBox.Yes | QMessageBox.No,
-                                    QMessageBox.No) == QMessageBox.Yes
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(f"{verb} selected moves")
+        dialog.setText(f"{verb} {count:,} selected file move(s)?")
+        dialog.setInformativeText("Restore the selected files to their recorded original paths."
+                                  if verb == "Undo" else
+                                  "Move the selected files to their proposed destinations. You can undo completed moves in History & undo.")
+        cancel = dialog.addButton(QMessageBox.Cancel)
+        accept = dialog.addButton(f"{verb} moves", QMessageBox.AcceptRole)
+        accept.setObjectName("ReviewButton")
+        dialog.setDefaultButton(cancel)
+        dialog.setEscapeButton(cancel)
+        dialog.exec()
+        return dialog.clickedButton() == accept
 
     def _apply_moves(self):
         page = self._pages["AI Organizer"]
@@ -235,7 +278,7 @@ class MainWindow(QMainWindow):
         if worker.error:
             QMessageBox.warning(self, "Activity History", worker.error)
         else:
-            history.show_rows(worker.rows)
+            history.show_rows(worker.rows, worker.batch)
         if worker.action != "reconcile":
             self._show_page("Activity History")
             directory = self._pages["AI Organizer"]._directory
@@ -282,6 +325,8 @@ class MainWindow(QMainWindow):
     def _start_scan(self, directory: Path) -> None:
         if self._duplicate_worker is not None or self._scan_worker is not None:
             return
+        self._header_subtitle.setText(str(directory))
+        self._header_subtitle.setToolTip(str(directory))
         worker = DirectoryScanWorker(directory)
         worker.progress.connect(self._on_scan_progress)
         worker.completed.connect(self._on_scan_completed)
@@ -303,9 +348,6 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_scan_progress(self, stage: str, current: int, total: int) -> None:
-        self.statusBar().showMessage(
-            f"{stage.upper()}   /   {current:,}" + (f" of {total:,} files" if total else " files discovered")
-        )
         if stage == "Analyzing" and total > 0:
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(current)
@@ -313,6 +355,9 @@ class MainWindow(QMainWindow):
         else:
             self._progress_bar.setRange(0, 0)
             self._set_status("SCANNING", muted=True)
+        self.statusBar().showMessage(
+            f"{stage.upper()}   /   {current:,}" + (f" of {total:,} files" if total else " files discovered")
+        )
 
     def _on_scan_completed(
         self,
@@ -328,6 +373,10 @@ class MainWindow(QMainWindow):
         if isinstance(files_page, MyFilesPage):
             files_page.set_scan_result(directory, files)
         self._pages["AI Organizer"].set_scan_result(directory, files)
+        if self._stack.currentWidget() is dashboard:
+            self._show_page("My Files")
+        self._header_subtitle.setText(str(directory))
+        self._header_subtitle.setToolTip(str(directory))
         self._scan_files = [item.metadata for item in files]
         self._has_scan = True
         duplicate_page = self._pages["Duplicate Finder"]
@@ -468,13 +517,16 @@ class MainWindow(QMainWindow):
         self._pages["Activity History"].setEnabled(True)
         self._scan_worker = None
         self._scan_button.setEnabled(True)
-        self._scan_button.setText("Scan folder")
+        self._scan_button.setText("Choose folder")
+        folder = self._pages["AI Organizer"]._directory
+        self._header_subtitle.setText(str(folder or "Local workspace"))
+        self._header_subtitle.setToolTip(str(folder or ""))
         self._progress_bar.hide()
         if worker is not None:
             worker.deleteLater()
 
     def _set_status(self, text: str, muted: bool) -> None:
-        self.statusBar().showMessage(f"LOCAL WORKSPACE   /   {text}")
+        self.statusBar().showMessage(f"{len(self._scan_files):,} files in workspace   ·   {text}")
         self._status_badge.setText(text)
         self._status_badge.setObjectName(
             "StatusBadgeMuted" if muted else "StatusBadge"

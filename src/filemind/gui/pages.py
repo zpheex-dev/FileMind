@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemind.gui.theme import fixed_font
 from filemind.gui.network import FileMap
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
@@ -167,6 +168,24 @@ class DashboardPage(QWidget):
         card.content_layout.addLayout(toolbar)
         self.map = FileMap()
         self.map.category_requested.connect(self.category_requested)
+        welcome = QVBoxLayout(self.map)
+        welcome.setContentsMargins(28, 20, 20, 20)
+        self.welcome = QWidget()
+        intro = QVBoxLayout(self.welcome)
+        intro.setSpacing(12)
+        intro.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Explore your files")
+        title.setObjectName("HeroTitle")
+        intro.addWidget(title)
+        description = QLabel("Inspect a folder, preview its moves,\nand undo them from History.")
+        description.setObjectName("MutedText")
+        intro.addWidget(description)
+        choose = QPushButton("Choose folder")
+        choose.setObjectName("PrimaryButton")
+        choose.clicked.connect(self.scan_requested)
+        intro.addWidget(choose, 0, Qt.AlignLeft)
+        welcome.addWidget(self.welcome, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.map.setMinimumHeight(300)
         card.content_layout.addWidget(self.map)
         layout.addWidget(card)
         layout.addLayout(self._build_metrics())
@@ -301,6 +320,7 @@ class DashboardPage(QWidget):
             entry = self._distribution_layout.takeAt(0)
             if entry.widget():
                 entry.widget().deleteLater()
+        self.welcome.hide()
         self.map.set_counts(category_counts)
         self.review_button.setEnabled(bool(files))
         self._category_chart.set_counts(category_counts.most_common())
@@ -404,7 +424,7 @@ class MyFilesPage(QWidget):
         empty_card = SurfaceCard()
         self._empty_state = EmptyState(
             "No files to display",
-            "Choose a folder to list files. This prototype does not modify them.",
+            "Choose a folder to browse its files.",
             icon="▤",
         )
         empty_card.content_layout.addWidget(self._empty_state)
@@ -416,15 +436,27 @@ class MyFilesPage(QWidget):
         self._preview_card = SurfaceCard()
         add_card_heading(
             self._preview_card.content_layout,
-            "Content preview",
-            "Extracted text stays on this device.",
+            "File inspector",
         )
         self._preview = QPlainTextEdit()
         self._preview.setObjectName("ContentPreview")
         self._preview.setReadOnly(True)
         self._preview.setPlaceholderText("Select a file to preview its text.")
         self._preview.setMinimumHeight(150)
+        self.file_details = QLabel()
+        self.file_details.setTextFormat(Qt.PlainText)
+        self.file_details.setWordWrap(True)
+        self.file_details.setMinimumWidth(0)
+        self.file_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.file_details.setFont(fixed_font())
+        self._preview_card.content_layout.addWidget(self.file_details)
         self._preview_card.content_layout.addWidget(self._preview)
+        self.inspector_toggle = QPushButton("Inspector")
+        self.inspector_toggle.setCheckable(True)
+        self.inspector_toggle.setChecked(True)
+        self.inspector_toggle.toggled.connect(self._preview_card.setVisible)
+        self.inspector_toggle.setEnabled(False)
+        toolbar.addWidget(self.inspector_toggle)
         self._preview_card.setVisible(False)
         self._splitter.addWidget(self._preview_card)
         self._splitter.setSizes([760, 340])
@@ -461,7 +493,8 @@ class MyFilesPage(QWidget):
         self._category_filter.blockSignals(False)
         self._results_label.setText(f"{len(files):,} files")
         self._results_label.setToolTip(str(directory))
-        self._preview_card.setVisible(bool(files))
+        self.inspector_toggle.setEnabled(bool(files))
+        self._preview_card.setVisible(bool(files) and self.inspector_toggle.isChecked())
         if files:
             self._view_stack.setCurrentWidget(self._table)
             self._table.setCurrentIndex(self._proxy.index(0, 0))
@@ -474,6 +507,7 @@ class MyFilesPage(QWidget):
             )
             self._view_stack.setCurrentIndex(0)
             self._preview.clear()
+            self.file_details.clear()
 
     def _display_selected_file(
         self,
@@ -485,12 +519,14 @@ class MyFilesPage(QWidget):
     ) -> None:
         if not 0 <= row < self._proxy.rowCount():
             self._preview.clear()
+            self.file_details.clear()
             return
 
         source_row = self._proxy.mapToSource(self._proxy.index(row, 0)).row()
         classified_file = self._model.files[source_row]
         metadata = classified_file.metadata
         classification = classified_file.classification
+        self.file_details.setText(f"{metadata.path}\n\n{classification.category}   ·   {_format_size(metadata.size_bytes)}")
         if preview_metadata is None:
             self._preview.setPlainText(f"{metadata.name}\n\nLoading local preview...")
             self._pending_preview = metadata.path
@@ -568,6 +604,7 @@ class MyFilesPage(QWidget):
             self._table.setCurrentIndex(self._proxy.index(0, 0))
         else:
             self._preview.clear()
+            self.file_details.clear()
 
 
 
@@ -596,14 +633,14 @@ class OrganizerPage(QWidget):
         card = SurfaceCard()
         add_card_heading(
             card.content_layout,
-            "Proposed Organization",
-            "Suggestions place files in an Organized folder inside the scanned folder. This preview makes no changes to your files.",
+            "Review moves",
+            "Choose the files to move into Organized. Blocked files stay in place.",
         )
         self._summary = QLabel("Scan a folder to generate a plan.")
         self._summary.setWordWrap(True)
         card.content_layout.addWidget(self._summary)
         controls = QHBoxLayout()
-        self._folder_button = QPushButton("Customize category folder")
+        self._folder_button = QPushButton("Folder names…")
         self._folder_button.setEnabled(False)
         self._folder_button.clicked.connect(self._customize_folder)
         controls.addWidget(self._folder_button)
@@ -616,7 +653,7 @@ class OrganizerPage(QWidget):
         self.select_button.clicked.connect(self._toggle_selection)
         controls.addWidget(self.select_button)
         self.apply_button = QPushButton("Apply selected moves")
-        self.apply_button.setObjectName("PrimaryButton")
+        self.apply_button.setObjectName("ReviewButton")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested)
         controls.addWidget(self.apply_button)
@@ -627,8 +664,22 @@ class OrganizerPage(QWidget):
         self.model.modelReset.connect(self._update_apply)
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.horizontalHeader().setDefaultSectionSize(240)
-        card.content_layout.addWidget(self.table)
+        self.table.horizontalHeader().setDefaultSectionSize(185)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(1, 270)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().hide()
+        card.content_layout.addWidget(self.table, 1)
+        self.route = QLabel("Select a proposal to inspect its full route.")
+        self.route.setTextFormat(Qt.PlainText)
+        self.route.setWordWrap(True)
+        self.route.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.route.setFont(fixed_font())
+        card.content_layout.addWidget(self.route)
+        self.table.selectionModel().currentRowChanged.connect(self._inspect_route)
+        self.model.modelReset.connect(self._inspect_route)
         layout.addWidget(card)
         self._excluded_count = 0
         self.generation = 0
@@ -638,6 +689,13 @@ class OrganizerPage(QWidget):
         self._settings = QSettings("FileMind", "FolderProfiles")
         self._directory = None
         self._files = []
+
+    def _inspect_route(self, index=None, previous=None):
+        if index is not None and index.isValid():
+            proposal = self.model.rows[index.row()]
+            self.route.setText(f"FROM   {proposal.current_path}\nTO     {proposal.destination}")
+        else:
+            self.route.setText("Select a proposal to inspect its full route.")
 
     def _customize_folder(self):
         categories = sorted({item.classification.category for item in self._files})
@@ -705,6 +763,7 @@ class OrganizerPage(QWidget):
         if directory != self._directory:
             self.model.unchecked.clear()
         self._directory, self._files = directory, files
+        self.model.directory = directory
         try:
             profile = json.loads(self._settings.value(self._profile_key(), "{}"))
             self._folder_names = dict(profile.get("folders", {}))
@@ -736,6 +795,8 @@ class OrganizerPage(QWidget):
     def _accept_plan(self, generation, rows, error):
         if generation == self.generation:
             self.model.replace(rows)
+            if rows:
+                self.table.selectRow(0)
             if error:
                 self._summary.setText(error)
 
@@ -895,7 +956,7 @@ class SettingsPage(QWidget):
         layout.setSpacing(16)
 
         card = SurfaceCard()
-        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.1.0")
+        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.3.0")
         note = QLabel("Scans and exact duplicate checks run on this device. Review moves in Organizer and restore them from History.")
         note.setWordWrap(True)
         card.content_layout.addWidget(note)

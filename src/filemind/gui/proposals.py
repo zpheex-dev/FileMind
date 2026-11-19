@@ -21,12 +21,13 @@ class PlanWorker(QThread):
 
 
 class ProposalModel(QAbstractTableModel):
-    headings = ("Current path", "Proposed destination", "Reason", "Conflict status")
+    headings = ("Current location", "Proposed destination", "Reason", "Conflict status")
 
     def __init__(self, parent):
         super().__init__(parent)
         self.rows = ()
         self.unchecked = set()
+        self.directory = None
 
     def replace(self, rows):
         self.beginResetModel()
@@ -56,6 +57,9 @@ class ProposalModel(QAbstractTableModel):
         row = self.rows[index.row()]
         if role == Qt.CheckStateRole and index.column() == 0:
             return Qt.Unchecked if row.has_conflict or row.current_path in self.unchecked else Qt.Checked
+        if role == Qt.DisplayRole and self.directory is not None and index.column() < 2:
+            path = (row.current_path, row.destination)[index.column()]
+            return str(path.relative_to(self.directory))
         if role in (Qt.DisplayRole, Qt.ToolTipRole):
             return (str(row.current_path), str(row.destination), row.reason,
                     "; ".join(row.conflicts) or "No conflict detected")[index.column()]

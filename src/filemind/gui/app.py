@@ -5,7 +5,7 @@ from importlib.resources import files
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QIcon
 
 from filemind.gui.theme import APP_STYLESHEET
 from filemind.gui.window import MainWindow
@@ -18,7 +18,6 @@ def main() -> int:
     application.setWindowIcon(QIcon(str(files("filemind.gui").joinpath("assets", "filemind.svg"))))
     application.setOrganizationName("FileMind")
     application.setStyle("Fusion")
-    application.setFont(QFont("Segoe UI" if sys.platform == "win32" else "DejaVu Sans", 9))
     application.setStyleSheet(APP_STYLESHEET)
 
     if "--smoke-test" in sys.argv:

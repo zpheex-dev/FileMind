@@ -14,10 +14,16 @@ On Linux, download `FileMind-linux-x86_64`, run `chmod +x FileMind-linux-x86_64`
 then launch it. Linux builds are produced on Linux by the release workflow;
 a Windows build cannot run on Linux.
 
-The desktop workspace uses a monochrome file map. Choose **Scan Downloads** for
-your downloads folder or **Scan folder** for another location. Once the scan
-finishes, choose a category on the map to browse its files or **Review moves** to
-open Organizer. **Scan details** expands the full category breakdown.
+The desktop workspace opens with a topographic overview. Choose **Choose folder**
+or **Scan Downloads** to start. The scan opens **My Files**. Select a row to
+inspect its original path, metadata, classification and local content preview.
+The **Inspector** control collapses the details pane. **Overview** includes a
+category map and the scan breakdown.
+
+Open **Organizer** to review each proposed destination. After confirming a move,
+FileMind opens **History & undo** and selects the completed moves from that batch.
+Use **Undo selected moves** above the table and confirm to restore those files.
+You can reopen History later and select individual moved rows.
 
 Organizer remembers custom category destinations and excluded extensions separately
 for each scanned folder. Exclusions affect move proposals. Excluded types still
