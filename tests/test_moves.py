@@ -68,6 +68,47 @@ def test_selection_partial_failure_and_reopened_undo(workspace):
     assert reopened.history()[0]["status"] == "undone"
 
 
+def test_undo_removes_created_folders_after_last_file(workspace):
+    journal, root, proposals, metadata = workspace
+    journal.apply(root, proposals[:2], metadata)
+    reopened = MoveJournal(journal.database)
+    first, last = [row["id"] for row in reopened.history()]
+    reopened.undo([first])
+    assert (root / "Organized" / "Documents").is_dir()
+    reopened.undo([last])
+    assert not (root / "Organized").exists()
+    assert all(proposal.current_path.is_file() for proposal in proposals)
+
+
+@pytest.mark.parametrize("existing", ["root", "category", "replacement", "other files"])
+def test_undo_keeps_unowned_or_nonempty_folders(workspace, existing):
+    journal, root, proposals, metadata = workspace
+    proposal = proposals[0]
+    organized = root / "Organized"
+    category = proposal.destination.parent
+    if existing == "root":
+        organized.mkdir()
+    elif existing == "category":
+        category.mkdir(parents=True)
+    journal.apply(root, [proposal], metadata)
+
+    if existing == "replacement":
+        saved = root / "saved-category"
+        category.rename(saved)
+        category.mkdir()
+        (saved / proposal.destination.name).rename(proposal.destination)
+    elif existing == "other files":
+        (category / "my-file.txt").write_text("My file")
+
+    journal.undo([journal.history()[0]["id"]])
+    assert journal.history()[0]["status"] == "undone"
+    assert proposal.current_path.read_text() == "a.txt"
+    assert organized.is_dir()
+    assert category.is_dir() == (existing != "root")
+    if existing == "other files":
+        assert (category / "my-file.txt").read_text() == "My file"
+
+
 @pytest.mark.parametrize("conflict", ["occupied", "edited", "replaced"])
 def test_undo_conflicts(workspace, conflict):
     journal, root, rows, metadata = workspace
@@ -118,6 +159,8 @@ def test_interruption_recovery(workspace, monkeypatch, undo, after_rename):
     states = {Path(r["original"]).name: r["status"] for r in reopened.history()}
     assert states["a.txt"] == (("undone" if after_rename else "moved") if undo
                                else ("moved" if after_rename else "skipped"))
+    if undo and after_rename:
+        assert not (root / "Organized").exists()
     if not undo:
         assert states["b.txt"] == states["c.txt"] == "skipped"
 

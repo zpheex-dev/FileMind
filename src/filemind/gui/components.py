@@ -1,8 +1,9 @@
 """Reusable widgets shared by FileMind pages."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPropertyAnimation, Qt
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -19,8 +20,8 @@ class SurfaceCard(QFrame):
         super().__init__(parent)
         self.setObjectName("SurfaceCard")
         self.content_layout = QVBoxLayout(self)
-        self.content_layout.setContentsMargins(20, 18, 20, 18)
-        self.content_layout.setSpacing(12)
+        self.content_layout.setContentsMargins(12, 10, 12, 10)
+        self.content_layout.setSpacing(8)
 
 
 class CardTitle(QWidget):
@@ -41,29 +42,6 @@ class CardTitle(QWidget):
             description_label.setObjectName("MutedText")
             description_label.setWordWrap(True)
             layout.addWidget(description_label)
-
-
-class MetricCard(SurfaceCard):
-    """A dashboard metric that can display an explicit empty value."""
-
-    def __init__(self, label: str, value: str, note: str) -> None:
-        super().__init__()
-        self.content_layout.setSpacing(7)
-
-        label_widget = QLabel(label.upper())
-        label_widget.setObjectName("MetricLabel")
-        self.value_widget = QLabel(value)
-        self.value_widget.setObjectName("MetricValue")
-        self.note_widget = QLabel(note)
-        self.note_widget.setObjectName("MutedText")
-
-        self.content_layout.addWidget(label_widget)
-        self.content_layout.addWidget(self.value_widget)
-        self.content_layout.addWidget(self.note_widget)
-
-    def set_value(self, value: str, note: str) -> None:
-        self.value_widget.setText(value)
-        self.note_widget.setText(note)
 
 
 class EmptyState(QWidget):
@@ -127,12 +105,30 @@ def add_card_heading(
     layout.addWidget(CardTitle(title, description))
 
 
-def add_status_row(
-    layout: QHBoxLayout,
-    text: str,
-    muted: bool = False,
-) -> StatusBadge:
-    """Add a workflow badge at the end of a horizontal row."""
-    badge = StatusBadge(text, muted)
-    layout.addWidget(badge)
-    return badge
+def detail_label(text: str = "") -> QLabel:
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    label.setMinimumWidth(0)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse |
+                                  Qt.TextInteractionFlag.TextSelectableByKeyboard)
+    return label
+
+def reveal(widget, duration, initial_opacity=0.72):
+    if not widget.isVisible() or getattr(widget.window(), "reduce_motion", False):
+        return
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(initial_opacity)
+    widget.setGraphicsEffect(effect)
+    animation = QPropertyAnimation(effect, b"opacity", effect)
+    animation.setDuration(duration)
+    animation.setStartValue(initial_opacity)
+    animation.setEndValue(1.0)
+    animation.finished.connect(lambda: widget.setGraphicsEffect(None))
+    animation.start()
+
+
+class FeedbackButton(QPushButton):
+    def __init__(self, text):
+        super().__init__(text)
+        self.pressed.connect(lambda: reveal(self, 100, 0.86))

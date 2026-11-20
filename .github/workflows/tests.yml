@@ -8,6 +8,7 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-22.04]
         python: ["3.11", "3.12"]
@@ -36,3 +37,10 @@ jobs:
           python -m pip install ".[build]"
           python build_app.py
           python -c "import subprocess; subprocess.run(['dist/FileMind.exe','--smoke-test'],check=True,timeout=90)"
+      - name: Upload tested Windows preview
+        if: github.event_name == 'pull_request' && runner.os == 'Windows' && matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileMind-Windows-preview
+          path: dist/FileMind.exe
+          if-no-files-found: error

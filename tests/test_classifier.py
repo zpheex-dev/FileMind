@@ -21,6 +21,15 @@ from filemind.gui.workers import DirectoryScanWorker
         ("organizer.py", "Code"),
         ("movie.mp4", "Video"),
         ("archive.zip", "Archives"),
+        ("preferences.toml", "Configuration"),
+        ("catalog.sqlite3", "Databases"),
+        ("mockup.psd", "Design"),
+        ("backup.iso", "Disk Images"),
+        ("novel.epub", "E-books"),
+        ("family.WOFF2", "Fonts"),
+        ("setup.msi", "Software"),
+        ("captions.srt", "Subtitles"),
+        ("model.glb", "3D Models"),
     ],
 )
 def test_rule_classifier_maps_known_extensions(
