@@ -1,5 +1,7 @@
+from PySide6.QtGui import QColor
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, Signal
 
+from filemind.gui.theme import AMBER, SUCCESS
 from filemind.organizer.planner import propose_organization
 
 
@@ -21,7 +23,7 @@ class PlanWorker(QThread):
 
 
 class ProposalModel(QAbstractTableModel):
-    headings = ("Current location", "Proposed destination", "Reason", "Conflict status")
+    headings = ("SOURCE", "DESTINATION", "REASON", "STATUS")
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -55,11 +57,16 @@ class ProposalModel(QAbstractTableModel):
         if not index.isValid():
             return
         row = self.rows[index.row()]
-        if role == Qt.CheckStateRole and index.column() == 0:
-            return Qt.Unchecked if row.has_conflict or row.current_path in self.unchecked else Qt.Checked
+        if role == Qt.CheckStateRole and index.column() == 0 and not row.has_conflict:
+            return Qt.Unchecked if row.current_path in self.unchecked else Qt.Checked
         if role == Qt.DisplayRole and self.directory is not None and index.column() < 2:
             path = (row.current_path, row.destination)[index.column()]
             return str(path.relative_to(self.directory))
+        if index.column() == 3:
+            if role == Qt.ForegroundRole:
+                return QColor(AMBER if row.has_conflict else SUCCESS)
+            if role == Qt.DisplayRole:
+                return "BLOCKED" if row.has_conflict else "READY"
         if role in (Qt.DisplayRole, Qt.ToolTipRole):
             return (str(row.current_path), str(row.destination), row.reason,
                     "; ".join(row.conflicts) or "No conflict detected")[index.column()]

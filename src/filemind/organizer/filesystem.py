@@ -35,7 +35,7 @@ def personal_parts(path, home):
 
 
 @contextmanager
-def parent_handle(path, home, create_from=None):
+def parent_handle(path, home, create_from=None, on_create=None):
     """Pin directories while checking and renaming. Only Apply creates category folders."""
     parts = personal_parts(path, home)
     current = home
@@ -52,13 +52,23 @@ def parent_handle(path, home, create_from=None):
                     win32file.FILE_FLAG_OPEN_REPARSE_POINT, None,
                 )
                 stack.callback(handle.Close)
-                _personal(directory.lstat())
+                info = directory.lstat()
+                _personal(info)
+                return info
             pin(home)
             for part in parts:
                 current /= part
+                created = False
                 if create_from and current.is_relative_to(create_from):
-                    current.mkdir(exist_ok=True)
-                pin(current)
+                    try:
+                        current.mkdir()
+                    except FileExistsError:
+                        pass
+                    else:
+                        created = True
+                info = pin(current)
+                if created and on_create is not None:
+                    on_create(current, info)
             yield current
         else:
             flags = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_RDONLY
@@ -67,14 +77,20 @@ def parent_handle(path, home, create_from=None):
             _personal(os.fstat(fd))
             for part in parts:
                 current /= part
+                created = False
                 if create_from and current.is_relative_to(create_from):
                     try:
                         os.mkdir(part, mode=0o700, dir_fd=fd)
                     except FileExistsError:
                         pass
+                    else:
+                        created = True
                 fd = os.open(part, flags, dir_fd=fd)
                 stack.callback(os.close, fd)
-                _personal(os.fstat(fd))
+                info = os.fstat(fd)
+                _personal(info)
+                if created and on_create is not None:
+                    on_create(current, info)
             yield fd
 
 
@@ -82,6 +98,24 @@ def _entry(parent, name):
     if os.name == "nt":
         return (parent / name).lstat()
     return os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+
+def directory_identity(info):
+    return [info.st_dev, info.st_ino, getattr(info, "st_birthtime_ns", None)]
+
+
+def remove_empty_directory(path, home, identity):
+    """Remove one recorded directory under a pinned parent."""
+    with parent_handle(path.parent, home) as parent:
+        info = _entry(parent, path.name)
+        _personal(info)
+        if not stat.S_ISDIR(info.st_mode) or directory_identity(info) != identity:
+            return False
+        if os.name == "nt":
+            (parent / path.name).rmdir()
+        else:
+            os.rmdir(path.name, dir_fd=parent)
+        return True
 
 
 def signature(info):
@@ -144,7 +178,7 @@ def rename_new(source, name, destination, target):
         raise OSError("Safe moves are supported on Linux and Windows")
 
 
-def move(root, home, original, organized, expected, checksum, undo=False):
+def move(root, home, original, organized, expected, checksum, undo=False, on_create=None):
     personal_parts(root, home)
     for path in (original, organized):
         personal_parts(path, home)
@@ -158,7 +192,7 @@ def move(root, home, original, organized, expected, checksum, undo=False):
         if value != checksum:
             raise ValueError("File contents have changed")
         create_from = None if undo else root / "Organized"
-        with parent_handle(dest.parent, home, create_from) as dst:
+        with parent_handle(dest.parent, home, create_from, on_create) as dst:
             volume = dst.stat().st_dev if os.name == "nt" else os.fstat(dst).st_dev
             if volume != expected[0]:
                 raise ValueError("Destination is on a different filesystem")

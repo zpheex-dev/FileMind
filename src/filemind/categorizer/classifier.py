@@ -69,7 +69,21 @@ CATEGORY_BY_EXTENSION = {
     ".rar": "Archives",
     ".tar": "Archives",
     ".gz": "Archives",
+    ".bz2": "Archives",
+    ".xz": "Archives",
+    ".zst": "Archives",
+    **dict.fromkeys((".ini", ".cfg", ".conf", ".toml", ".yaml", ".yml"), "Configuration"),
+    **dict.fromkeys((".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".duckdb"), "Databases"),
+    **dict.fromkeys((".psd", ".xcf", ".kra", ".ai", ".fig", ".sketch", ".indd"), "Design"),
+    **dict.fromkeys((".iso", ".img", ".dmg", ".vhd", ".vhdx", ".vmdk"), "Disk Images"),
+    **dict.fromkeys((".epub", ".mobi", ".azw", ".azw3", ".fb2", ".cbz", ".cbr"), "E-books"),
+    **dict.fromkeys((".ttf", ".otf", ".woff", ".woff2"), "Fonts"),
+    **dict.fromkeys((".exe", ".msi", ".msix", ".appimage", ".deb", ".rpm", ".apk"), "Software"),
+    **dict.fromkeys((".srt", ".vtt", ".ass", ".ssa"), "Subtitles"),
+    **dict.fromkeys((".blend", ".obj", ".stl", ".fbx", ".gltf", ".glb", ".3mf"), "3D Models"),
 }
+
+KNOWN_CATEGORIES = frozenset(CATEGORY_BY_EXTENSION.values()) | {"Other"}
 
 RULE_CONFIDENCE = 0.95
 UNKNOWN_CONFIDENCE = 0.2

@@ -14,11 +14,15 @@ On Linux, download `FileMind-linux-x86_64`, run `chmod +x FileMind-linux-x86_64`
 then launch it. Linux builds are produced on Linux by the release workflow;
 a Windows build cannot run on Linux.
 
-The desktop workspace opens with a topographic overview. Choose **Choose folder**
-or **Scan Downloads** to start. The scan opens **My Files**. Select a row to
-inspect its original path, metadata, classification and local content preview.
-The **Inspector** control collapses the details pane. **Overview** includes a
-category map and the scan breakdown.
+Choose **Choose folder** or **Scan Downloads** to start. **Overview** shows the
+latest attempt, its timing, and any paths that could not be read. It also keeps
+the last completed inventory and its category breakdown visible if a later
+scan fails or is cancelled. The **Files by category** chart shows counts for every category.
+Expand folders in **File tree** to browse the paths from that inventory.
+Select a category to filter **My Files**, or select
+a file to inspect its exact size, timestamps, classification, and local preview.
+Use **Inspector** to collapse the details pane, or **Rescan** to refresh the
+inventory. **About** includes a **Reduce motion** preference.
 
 Open **Organizer** to review each proposed destination. After confirming a move,
 FileMind opens **History & undo** and selects the completed moves from that batch.
@@ -128,7 +132,8 @@ Previewing a plan leaves files untouched. To try moving files:
    required folders under `Organized` and checks each file again before moving it.
 3. In **History**, inspect both paths, the status and any skip reason.
    Select moved rows, click **Undo selected moves** and confirm. You can also
-   do this after restarting FileMind. Empty category folders are retained.
+   do this after restarting FileMind. Undo removes empty destination folders
+   that FileMind recorded creating.
 
 Moves support regular user-owned files within the user profile on the same
 filesystem. Hidden paths, links and system files are excluded. Existing files

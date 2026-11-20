@@ -4,10 +4,10 @@ import sys
 from importlib.resources import files
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer
 from PySide6.QtGui import QIcon
 
-from filemind.gui.theme import APP_STYLESHEET
+from filemind.gui.theme import APP_STYLESHEET, fixed_font, workspace_palette
 from filemind.gui.window import MainWindow
 
 
@@ -18,6 +18,8 @@ def main() -> int:
     application.setWindowIcon(QIcon(str(files("filemind.gui").joinpath("assets", "filemind.svg"))))
     application.setOrganizationName("FileMind")
     application.setStyle("Fusion")
+    application.setFont(fixed_font())
+    application.setPalette(workspace_palette())
     application.setStyleSheet(APP_STYLESHEET)
 
     if "--smoke-test" in sys.argv:
@@ -29,7 +31,11 @@ def main() -> int:
     window.show()
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(1500, window.close)
-    return application.exec()
+    result = application.exec()
+    # Dispose of the widget tree while QApplication still owns the Qt runtime.
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    return result
 
 
 if __name__ == "__main__":

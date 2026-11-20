@@ -16,7 +16,7 @@ from filemind.categorizer.classifier import (
 from filemind.duplicate_detector.detector import (
     find_duplicates,
 )
-from filemind.scanner.scanner import ScanProgress, scan_directory
+from filemind.scanner.scanner import ScanIssue, ScanProgress, scan_directory
 
 
 LOGGER = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 class DirectoryScanWorker(QThread):
     """Scan and analyze a directory without blocking the GUI thread."""
 
-    progress = Signal(str, int, int)
+    progress = Signal(str, int, int, int)
     completed = Signal(object, object, object)
     failed = Signal(object, str)
     cancelled = Signal(object)
@@ -42,6 +42,9 @@ class DirectoryScanWorker(QThread):
         )
         self._cancellation_event = Event()
         self._last_progress = 0.0
+        self.result = None
+        self.metadata_processed = 0
+        self.metadata_issues: list[ScanIssue] = []
 
     def cancel(self) -> None:
         self._cancellation_event.set()
@@ -65,6 +68,7 @@ class DirectoryScanWorker(QThread):
             self.failed.emit(self.directory, str(error))
             return
 
+        self.result = scan_result
         if scan_result.cancelled or self._cancellation_event.is_set():
             self.cancelled.emit(self.directory)
             return
@@ -72,7 +76,7 @@ class DirectoryScanWorker(QThread):
         total_files = len(scan_result.files)
         analyses: list[ClassifiedFile] = []
         last_analysis_progress = monotonic()
-        self.progress.emit("Analyzing", 0, total_files)
+        self.progress.emit("Analyzing", 0, total_files, scan_result.directories_scanned)
         for index, file_path in enumerate(scan_result.files, start=1):
             if self._cancellation_event.is_set():
                 self.cancelled.emit(self.directory)
@@ -81,8 +85,11 @@ class DirectoryScanWorker(QThread):
             metadata = analyze_file(file_path, extract_content=False)
             classification = self._classifier.classify(metadata)
             analyses.append(ClassifiedFile(metadata, classification))
+            if metadata.analysis_error:
+                self.metadata_issues.append(ScanIssue(file_path, metadata.analysis_error))
+            self.metadata_processed = index
             if monotonic() - last_analysis_progress >= 0.05 or index == total_files:
-                self.progress.emit("Analyzing", index, total_files)
+                self.progress.emit("Analyzing", index, total_files, scan_result.directories_scanned)
                 last_analysis_progress = monotonic()
 
         if self._cancellation_event.is_set():
@@ -93,7 +100,7 @@ class DirectoryScanWorker(QThread):
     def _report_scan_progress(self, progress: ScanProgress) -> None:
         now = monotonic()
         if now - self._last_progress >= 0.05:
-            self.progress.emit("Scanning", progress.files_found, 0)
+            self.progress.emit("Scanning", progress.files_found, 0, progress.directories_scanned)
             self._last_progress = now
 
 

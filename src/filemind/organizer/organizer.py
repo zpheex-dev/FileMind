@@ -1,6 +1,7 @@
 """Durable per-file move intents. Recovery observes paths and never renames them."""
 
 from contextlib import closing, contextmanager
+import errno
 import json
 import logging
 import os
@@ -8,7 +9,10 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
-from filemind.organizer.filesystem import FILE_ERRORS, digest, move, parent_handle, personal_parts
+from filemind.organizer.filesystem import (
+    FILE_ERRORS, digest, directory_identity, move, parent_handle, personal_parts,
+    remove_empty_directory,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +48,8 @@ class MoveJournal:
             original TEXT NOT NULL, destination TEXT NOT NULL, signature TEXT NOT NULL,
             checksum TEXT, status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
             created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS created_folders (
+            path TEXT PRIMARY KEY, identity TEXT NOT NULL)""")
         return db
 
     @contextmanager
@@ -116,6 +122,30 @@ class MoveJournal:
                 if eligible:
                     self._finish(db, entry_id, undo=True)
 
+    def _record_folder(self, db, path, info):
+        if info.st_ino:
+            db.execute("INSERT OR REPLACE INTO created_folders VALUES (?,?)",
+                       (_stored_text(os.path.normcase(path)), json.dumps(directory_identity(info))))
+
+    def _remove_empty_folders(self, db, category):
+        # Walk only the two destination levels. Existing user folders have no record.
+        for folder in (category, category.parent):
+            key = _stored_text(os.path.normcase(folder))
+            record = db.execute("SELECT identity FROM created_folders WHERE path=?", (key,)).fetchone()
+            if record is None:
+                break
+            try:
+                removed = remove_empty_directory(folder, self.home, json.loads(record["identity"]))
+            except FileNotFoundError:
+                removed = True
+            except FILE_ERRORS as error:
+                if getattr(error, "errno", None) not in (errno.ENOTEMPTY, errno.EEXIST):
+                    LOGGER.info("Could not remove empty folder %s: %s", folder, error)
+                break
+            if not removed:
+                break
+            db.execute("DELETE FROM created_folders WHERE path=?", (key,))
+
     def _finish(self, db, entry_id, undo):
         # The intent is already committed. Hold the writer lock across rename and
         # status update so another instance cannot reconcile between those steps.
@@ -124,9 +154,11 @@ class MoveJournal:
             row = db.execute("SELECT * FROM moves WHERE id=?", (entry_id,)).fetchone()
             if row["status"] != ("undoing" if undo else "moving"):
                 return
+            destination = Path(row["destination"])
             try:
-                move(Path(row["root"]), self.home, Path(row["original"]), Path(row["destination"]),
-                     json.loads(row["signature"]), row["checksum"], undo)
+                move(Path(row["root"]), self.home, Path(row["original"]), destination,
+                     json.loads(row["signature"]), row["checksum"], undo,
+                     on_create=lambda path, info: self._record_folder(db, path, info))
             except FILE_ERRORS as error:
                 status, reason = ("moved" if undo else "skipped"), str(error)
                 if undo:
@@ -134,6 +166,8 @@ class MoveJournal:
                 LOGGER.warning("%s: %s", row["original"], reason)
             else:
                 status, reason = ("undone" if undo else "moved"), ""
+                if undo:
+                    self._remove_empty_folders(db, destination.parent)
             db.execute("UPDATE moves SET status=?,reason=? WHERE id=?", (status, _stored_text(reason), entry_id))
 
     def _location(self, path, row):
@@ -166,5 +200,9 @@ class MoveJournal:
                 status = "undone" if row["status"] == "undoing" else "skipped"
             else:
                 status = "needs review"
+            if status == "undone":
+                category = Path(row["destination"]).parent
+                if category.parent == Path(row["root"]) / "Organized":
+                    self._remove_empty_folders(db, category)
             db.execute("UPDATE moves SET status=?,reason='Recovered after interruption' WHERE id=?",
                        (status, row["id"]))

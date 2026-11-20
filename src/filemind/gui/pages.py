@@ -4,16 +4,15 @@ from collections.abc import Callable
 import hashlib
 import json
 import os
-from collections import Counter
-import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSortFilterProxyModel, QTimer, QRectF, QEvent, QSettings
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, Signal, QTimer, QSettings, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QCheckBox,
     QComboBox,
-    QFrame,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -21,354 +20,39 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
     QStackedWidget,
     QTableView,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
-from filemind.gui.theme import fixed_font
-from filemind.gui.network import FileMap
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
-from filemind.gui.file_model import FileTableModel
+from filemind.gui.file_model import FileTableModel, format_size as _format_size
+from filemind.gui.scan_report import DashboardPage
 from filemind.gui.workers import PreviewWorker
 
 from filemind.gui.components import (
     EmptyState,
-    MetricCard,
+    FeedbackButton,
     SurfaceCard,
     add_card_heading,
-    add_status_row,
+    detail_label,
+    reveal,
 )
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
-
-
-CATEGORY_COLORS = (
-    "#c0c0c0", "#a6a6a6", "#c1c1c1", "#aeaeae", "#9c9c9c",
-    "#bfbfbf", "#d5d5d5", "#b7b7b7", "#a8a8a8", "#c7c7c7",
-)
-
-
-class CategoryChart(QWidget):
-    """A circular overview by file count, with an accessible text summary."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._counts = {}
-        self.setMinimumHeight(190)
-        self.setAccessibleName("Category distribution by number of files")
-        self.setAccessibleDescription("No scan results yet.")
-
-    def set_counts(self, counts) -> None:
-        self._counts = dict(counts)
-        total = sum(self._counts.values())
-        self.setAccessibleDescription(
-            ", ".join(f"{name}: {count} files, {count / total:.0%}"
-                      for name, count in self._counts.items())
-            if total else "No files in the latest scan."
-        )
-        self.update()
-
-    def _chart_rect(self):
-        size = min(self.width() - 24, self.height() - 24, 180)
-        rect = QRectF((self.width() - size) / 2, (self.height() - size) / 2, size, size)
-        rect.adjust(13, 13, -13, -13)
-        return rect
-
-    def _category_at(self, point):
-        rect = self._chart_rect()
-        dx = point.x() - rect.center().x()
-        dy = point.y() - rect.center().y()
-        radius = rect.width() / 2
-        if not radius - 9 <= math.hypot(dx, dy) <= radius + 9:
-            return None
-        total = sum(self._counts.values())
-        if not total:
-            return None
-        angle = ((math.degrees(math.atan2(dx, -dy)) + 360) % 360) * 16
-        used = 0
-        items = list(self._counts.items())
-        for index, (name, count) in enumerate(items):
-            span = 360 * 16 - used if index == len(items) - 1 else round(count * 360 * 16 / total)
-            if used <= angle < used + span:
-                return name, count, total
-            used += span
-        return None
-
-    def event(self, event):
-        if event.type() == QEvent.Type.ToolTip:
-            category = self._category_at(event.pos())
-            if category is None:
-                QToolTip.hideText()
-                event.ignore()
-            else:
-                name, count, total = category
-                QToolTip.showText(event.globalPos(),
-                                  f"{name}: {count:,} files ({count / total:.0%})", self)
-            return True
-        return super().event(event)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self._chart_rect()
-        pen = QPen(QColor("#353535"), 18)
-        painter.setPen(pen)
-        painter.drawEllipse(rect)
-        total = sum(self._counts.values())
-        if total:
-            start = 90 * 16
-            used = 0
-            items = list(self._counts.items())
-            for index, (_, count) in enumerate(items):
-                span = 360 * 16 - used if index == len(items) - 1 else round(count * 360 * 16 / total)
-                pen.setColor(QColor(CATEGORY_COLORS[index % len(CATEGORY_COLORS)]))
-                painter.setPen(pen)
-                painter.drawArc(rect, start - used, -span)
-                used += span
-        painter.setPen(QColor("#ececec"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
-                         f"{total:,}\nfiles" if total else "No files")
-
-
-class DashboardPage(QWidget):
-    scan_requested = Signal()
-    downloads_requested = Signal()
-    category_requested = Signal(str)
-    review_requested = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(18)
-
-        card = SurfaceCard()
-        toolbar = QHBoxLayout()
-        self.map_title = title = QLabel("File map")
-        title.setObjectName("WelcomeTitle")
-        toolbar.addWidget(title)
-        toolbar.addStretch()
-        self._scan_button = QPushButton("Scan Downloads")
-        self._scan_button.setObjectName("PrimaryButton")
-        self._scan_button.clicked.connect(self.downloads_requested)
-        toolbar.addWidget(self._scan_button)
-        self.review_button = QPushButton("Review moves")
-        self.review_button.clicked.connect(self.review_requested)
-        self.review_button.setEnabled(False)
-        toolbar.addWidget(self.review_button)
-        card.content_layout.addLayout(toolbar)
-        self.map = FileMap()
-        self.map.category_requested.connect(self.category_requested)
-        welcome = QVBoxLayout(self.map)
-        welcome.setContentsMargins(28, 20, 20, 20)
-        self.welcome = QWidget()
-        intro = QVBoxLayout(self.welcome)
-        intro.setSpacing(12)
-        intro.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("Explore your files")
-        title.setObjectName("HeroTitle")
-        intro.addWidget(title)
-        description = QLabel("Inspect a folder, preview its moves,\nand undo them from History.")
-        description.setObjectName("MutedText")
-        intro.addWidget(description)
-        choose = QPushButton("Choose folder")
-        choose.setObjectName("PrimaryButton")
-        choose.clicked.connect(self.scan_requested)
-        intro.addWidget(choose, 0, Qt.AlignLeft)
-        welcome.addWidget(self.welcome, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        self.map.setMinimumHeight(300)
-        card.content_layout.addWidget(self.map)
-        layout.addWidget(card)
-        layout.addLayout(self._build_metrics())
-        details = QWidget()
-        detail_layout = QVBoxLayout(details)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.addLayout(self._build_overview_cards())
-        detail_layout.addWidget(self._build_distribution_details())
-        toggle = QPushButton("Scan details")
-        toggle.setCheckable(True)
-        toggle.toggled.connect(details.setVisible)
-        details.hide()
-        layout.addWidget(toggle)
-        layout.addWidget(details)
-        layout.addStretch(1)
-
-    def _build_metrics(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(14)
-        metrics = (
-            ("Files found", "—", "Awaiting first scan"),
-            ("Storage analyzed", "—", "Metadata not available yet"),
-            ("Duplicate groups", "—", "Not checked yet"),
-            ("Categories", "—", "Not classified yet"),
-        )
-        self._metric_cards: list[MetricCard] = []
-        for label, value, note in metrics:
-            card = MetricCard(label, value, note)
-            self._metric_cards.append(card)
-            layout.addWidget(card, 1)
-        return layout
-
-    def _build_overview_cards(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(14)
-
-        scan_card = SurfaceCard()
-        add_card_heading(
-            scan_card.content_layout,
-            "Scan overview",
-            "Directory coverage and scan health.",
-        )
-        self._scan_empty_state = EmptyState(
-            "No directory scanned",
-            "Choose a folder to begin. Scanning includes accessible subfolders.",
-            icon="⌕",
-        )
-        scan_card.content_layout.addWidget(self._scan_empty_state)
-
-        activity_card = SurfaceCard()
-        add_card_heading(
-            activity_card.content_layout,
-            "Category distribution",
-            "Extension rules · local processing",
-        )
-        self._category_chart = CategoryChart()
-        activity_card.content_layout.addWidget(self._category_chart)
-        self._chart_caption = QLabel("File count by category")
-        self._chart_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._chart_caption.setObjectName("MutedText")
-        activity_card.content_layout.addWidget(self._chart_caption)
-
-        layout.addWidget(scan_card, 1)
-        layout.addWidget(activity_card, 1)
-        return layout
-
-    def _build_distribution_details(self):
-        card = SurfaceCard()
-        add_card_heading(
-            card.content_layout, "Category details",
-            "File count, share of files, total known size, and file types in the latest scan.",
-        )
-        self._distribution_layout = QVBoxLayout()
-        self._distribution_empty = QLabel("Scan a folder to see category details.")
-        self._distribution_empty.setObjectName("MutedText")
-        self._distribution_layout.addWidget(self._distribution_empty)
-        card.content_layout.addLayout(self._distribution_layout)
-        return card
-
-    def set_scan_running(self, directory: Path) -> None:
-        self._scan_button.setEnabled(False)
-        self._scan_empty_state.set_message(
-            f"Scanning {directory.name}",
-            "Discovering files and extracting supported metadata.",
-        )
-
-    def set_scan_failed(self, directory: Path) -> None:
-        self._scan_button.setEnabled(True)
-        self._scan_empty_state.set_message(
-            "Scan failed",
-            f"FileMind could not read {directory}. Your files were not changed.",
-        )
-
-    def set_scan_cancelled(self, directory: Path) -> None:
-        self._scan_button.setEnabled(True)
-        self._scan_empty_state.set_message(
-            "Scan cancelled",
-            f"The scan of {directory} was cancelled. Previous results were kept.",
-        )
-
-    def set_scan_result(
-        self,
-        directory: Path,
-        files: list[ClassifiedFile],
-        issue_count: int,
-    ) -> None:
-        self._scan_button.setEnabled(True)
-        self.map_title.setText(directory.name or str(directory))
-        self.map_title.setToolTip(str(directory))
-        self.map.setAccessibleDescription(f"Files in {directory}. Choose a category to browse.")
-        self.map.setToolTip(str(directory))
-        self._metric_cards[0].set_value(str(len(files)), f"in {directory.name}")
-        sizes = [
-            item.metadata.size_bytes
-            for item in files
-            if item.metadata.size_bytes is not None
-        ]
-        if len(sizes) == len(files):
-            self._metric_cards[1].set_value(
-                _format_size(sum(sizes)),
-                "From the latest scan",
-            )
-        else:
-            self._metric_cards[1].set_value(
-                "—",
-                f"Size available for {len(sizes)} of {len(files)} files",
-            )
-        category_counts = Counter(
-            item.classification.category for item in files
-        )
-        while self._distribution_layout.count():
-            entry = self._distribution_layout.takeAt(0)
-            if entry.widget():
-                entry.widget().deleteLater()
-        self.welcome.hide()
-        self.map.set_counts(category_counts)
-        self.review_button.setEnabled(bool(files))
-        self._category_chart.set_counts(category_counts.most_common())
-        if not files:
-            empty = QLabel("No files found in the latest scan.")
-            empty.setObjectName("MutedText")
-            self._distribution_layout.addWidget(empty)
-        for index, (category, count) in enumerate(category_counts.most_common()):
-            items = [item for item in files if item.classification.category == category]
-            sizes = [item.metadata.size_bytes for item in items if item.metadata.size_bytes is not None]
-            extensions = Counter(item.metadata.extension or "(no extension)" for item in items)
-            types = ", ".join(f"{ext} ({number})" for ext, number in extensions.most_common())
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 6, 0, 6)
-            label = QLabel(category)
-            label.setMinimumWidth(100)
-            label.setStyleSheet(f"color: {CATEGORY_COLORS[index % len(CATEGORY_COLORS)]}; font-weight: 600;")
-            info = QLabel(
-                f"{count:,} files  ·  {count / len(files):.0%}  ·  "
-                f"{_format_size(sum(sizes))} known"
-                + (f" ({len(sizes)}/{count} sizes available)" if len(sizes) != count else "")
-                + f"  ·  {types}"
-            )
-            info.setWordWrap(True)
-            info.setToolTip(types)
-            row_layout.addWidget(label)
-            row_layout.addWidget(info, 1)
-            self._distribution_layout.addWidget(row)
-        self._metric_cards[3].set_value(
-            str(len(category_counts)),
-            "Rule-based categories",
-        )
-        message = f"Found {len(files)} files in {directory}, including subfolders."
-        if issue_count:
-            message += f" {issue_count} filesystem issue(s) need attention."
-        self._scan_empty_state.set_message(
-            "Scan complete",
-            message,
-        )
 
 
 class MyFilesPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(10)
@@ -382,17 +66,13 @@ class MyFilesPage(QWidget):
         self._results_label.setObjectName("MutedText")
         toolbar.addWidget(self._search, 1)
         toolbar.addWidget(self._category_filter)
-        toolbar.addWidget(self._results_label)
+        self._results_label.setWordWrap(True)
         layout.addLayout(toolbar)
+        layout.addWidget(self._results_label)
 
         self._model = FileTableModel(self)
-        self._proxy = QSortFilterProxyModel(self)
-        self._proxy.setSourceModel(self._model)
-        self._proxy.setSortRole(Qt.ItemDataRole.UserRole)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(-1)
         self._table = QTableView()
-        self._table.setModel(self._proxy)
+        self._table.setModel(self._model)
         self._table.setSortingEnabled(True)
         self._table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self._table.setShowGrid(False)
@@ -408,17 +88,15 @@ class MyFilesPage(QWidget):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Interactive
-        )
-        self._table.horizontalHeader().setSectionResizeMode(
-            6, QHeaderView.ResizeMode.Interactive
-        )
-        for column, width in enumerate((210, 58, 75, 138, 105, 95, 220)):
+        for column, width in enumerate((185, 54, 72, 142, 108)):
             self._table.setColumnWidth(column, width)
+        # The inspector shows the full location and the rule explanation.
+        self._table.hideColumn(5)
+        self._table.hideColumn(6)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setMinimumHeight(260)
         self._analyses: list[ClassifiedFile] = []
+        self._selected_path: Path | None = None
 
         self._view_stack = QStackedWidget()
         empty_card = SurfaceCard()
@@ -432,34 +110,49 @@ class MyFilesPage(QWidget):
         self._view_stack.addWidget(self._table)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.addWidget(self._view_stack)
+        self._splitter.setChildrenCollapsible(False)
 
         self._preview_card = SurfaceCard()
         add_card_heading(
             self._preview_card.content_layout,
-            "File inspector",
+            "FILE INSPECTOR",
         )
         self._preview = QPlainTextEdit()
         self._preview.setObjectName("ContentPreview")
         self._preview.setReadOnly(True)
         self._preview.setPlaceholderText("Select a file to preview its text.")
-        self._preview.setMinimumHeight(150)
-        self.file_details = QLabel()
-        self.file_details.setTextFormat(Qt.PlainText)
-        self.file_details.setWordWrap(True)
-        self.file_details.setMinimumWidth(0)
-        self.file_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.file_details.setFont(fixed_font())
+        self._preview.setMinimumHeight(105)
+        self._file_name = detail_label()
+        self._file_name.setObjectName("CardTitle")
+        self.file_details = detail_label()
+        self._preview_status = QLabel("Select a file")
+        self._preview_status.setObjectName("SectionCaption")
+        self._copy = FeedbackButton("Copy path")
+        self._copy.setEnabled(False)
+        self._copy.clicked.connect(self._copy_path)
+        self._open_folder = FeedbackButton("Open containing folder")
+        self._open_folder.setEnabled(False)
+        self._open_folder.clicked.connect(self._show_folder)
+        actions = QHBoxLayout()
+        actions.addWidget(self._copy)
+        actions.addWidget(self._open_folder)
+        actions.addStretch()
+        self._preview_card.content_layout.addWidget(self._file_name)
+        self._preview_card.content_layout.addLayout(actions)
         self._preview_card.content_layout.addWidget(self.file_details)
+        self._preview_card.content_layout.addWidget(self._preview_status)
         self._preview_card.content_layout.addWidget(self._preview)
-        self.inspector_toggle = QPushButton("Inspector")
+        self.inspector_toggle = FeedbackButton("Inspector")
         self.inspector_toggle.setCheckable(True)
         self.inspector_toggle.setChecked(True)
-        self.inspector_toggle.toggled.connect(self._preview_card.setVisible)
+        self.inspector_toggle.toggled.connect(self._toggle_inspector)
         self.inspector_toggle.setEnabled(False)
         toolbar.addWidget(self.inspector_toggle)
         self._preview_card.setVisible(False)
         self._splitter.addWidget(self._preview_card)
-        self._splitter.setSizes([760, 340])
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        self._splitter.setSizes([680, 420])
         layout.addWidget(self._splitter, 1)
 
         self._table.selectionModel().currentRowChanged.connect(
@@ -472,6 +165,30 @@ class MyFilesPage(QWidget):
         self._search.textChanged.connect(lambda: self._search_timer.start())
         self._category_filter.currentTextChanged.connect(self._filter_rows)
 
+    def _toggle_inspector(self, visible):
+        self._preview_card.setVisible(visible)
+        if visible:
+            reveal(self._preview_card, 160)
+
+    def _copy_path(self):
+        if self._selected_path is not None:
+            QApplication.clipboard().setText(str(self._selected_path))
+
+    def _show_folder(self):
+        path = self._selected_path
+        if path is not None and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
+            QMessageBox.warning(self, "Could not open folder", str(path.parent))
+
+    def _clear_details(self):
+        self._selected_path = None
+        self._pending_preview = None
+        self._copy.setEnabled(False)
+        self._open_folder.setEnabled(False)
+        self._preview.clear()
+        self._file_name.clear()
+        self.file_details.clear()
+        self._preview_status.setText("Select a file")
+
     def set_scan_result(
         self,
         directory: Path,
@@ -481,7 +198,6 @@ class MyFilesPage(QWidget):
         self._generation += 1
         self._preview_cache.clear()
         self._pending_preview = None
-        self._model.set_files(files)
         categories = {item.classification.category for item in files}
         self._search.clear()
         self._search.setEnabled(bool(files))
@@ -497,17 +213,15 @@ class MyFilesPage(QWidget):
         self._preview_card.setVisible(bool(files) and self.inspector_toggle.isChecked())
         if files:
             self._view_stack.setCurrentWidget(self._table)
-            self._table.setCurrentIndex(self._proxy.index(0, 0))
-            self._display_selected_file(0, 0, -1, -1)
             self._filter_rows()
         else:
+            self._model.set_files([])
             self._empty_state.set_message(
                 "No files found",
                 f"No files were found in {directory} or its accessible subfolders.",
             )
             self._view_stack.setCurrentIndex(0)
-            self._preview.clear()
-            self.file_details.clear()
+            self._clear_details()
 
     def _display_selected_file(
         self,
@@ -517,41 +231,60 @@ class MyFilesPage(QWidget):
         _previous_column: int,
         preview_metadata=None,
     ) -> None:
-        if not 0 <= row < self._proxy.rowCount():
-            self._preview.clear()
-            self.file_details.clear()
+        if not 0 <= row < self._model.rowCount():
+            self._clear_details()
             return
 
-        source_row = self._proxy.mapToSource(self._proxy.index(row, 0)).row()
-        classified_file = self._model.files[source_row]
-        metadata = classified_file.metadata
+        classified_file = self._model.files[row]
+        scanned = classified_file.metadata
+        metadata = preview_metadata if preview_metadata is not None else scanned
         classification = classified_file.classification
-        self.file_details.setText(f"{metadata.path}\n\n{classification.category}   ·   {_format_size(metadata.size_bytes)}")
+        self._selected_path = scanned.path
+        self._file_name.setText(scanned.name)
+        self._copy.setEnabled(True)
+        self._open_folder.setEnabled(True)
+        size = ("Unavailable" if metadata.size_bytes is None else
+                f"{metadata.size_bytes:,} bytes ({_format_size(metadata.size_bytes)})")
+        modified = (f"{metadata.modified_at:%Y-%m-%d %H:%M:%S} local"
+                    if metadata.modified_at else "Unavailable")
+        created = (f"{metadata.created_at:%Y-%m-%d %H:%M:%S} local"
+                   if metadata.created_at else "Unavailable")
+        changed = preview_metadata is not None and (
+            scanned.identity, scanned.size_bytes, scanned.modified_at_ns
+        ) != (metadata.identity, metadata.size_bytes, metadata.modified_at_ns)
+        details = [
+            str(scanned.path),
+            f"Type        {metadata.extension or 'No extension'}",
+            f"Size        {size}",
+            f"Modified    {modified}",
+            f"Created     {created}",
+            f"Category    {classification.category}",
+            f"Rule        {classification.explanation}",
+            f"Strength    {classification.confidence:.0%} (heuristic)",
+        ]
+        if changed:
+            details.append("File differs from the scanned inventory")
+        if scanned.analysis_error:
+            details.append(f"Scan issue  {scanned.analysis_error}")
+        self.file_details.setText("\n".join(details))
         if preview_metadata is None:
-            self._preview.setPlainText(f"{metadata.name}\n\nLoading local preview...")
+            self._preview_status.setText("PREVIEW  ·  LOADING")
+            self._preview.clear()
             self._pending_preview = metadata.path
             self._start_preview()
             return
-        metadata = preview_metadata
+
         if metadata.content_status == "extracted":
+            status = "Truncated" if metadata.content_truncated else "Ready"
             text = metadata.extracted_text or "No text content found."
-            if metadata.content_truncated:
-                text += "\n\n[Preview truncated for safety.]"
         elif metadata.content_status == "unsupported":
-            text = (
-                "No text extractor is available for "
-                f"{metadata.extension or 'this file type'}."
-            )
+            status = "Unsupported"
+            text = f"No text preview for {metadata.extension or 'files with no extension'}."
         else:
-            text = (
-                metadata.analysis_error or "Content could not be analyzed."
-            )
-        classification_details = (
-            f"Rule-based category: {classification.category}\n"
-            f"Rule score (not a probability): {classification.confidence:.0%}\n"
-            f"Why: {classification.explanation}"
-        )
-        self._preview.setPlainText(f"{classification_details}\n\n{text}")
+            status = "Skipped" if metadata.content_status == "skipped" else "Unreadable"
+            text = metadata.analysis_error or "Content could not be analyzed."
+        self._preview_status.setText(f"PREVIEW  ·  {status.upper()}")
+        self._preview.setPlainText(text)
 
     def _start_preview(self):
         if self._closing or self._preview_worker is not None or self._pending_preview is None:
@@ -575,9 +308,9 @@ class MyFilesPage(QWidget):
             self._preview_cache[metadata.path] = metadata
         current = self._table.currentIndex()
         if current.isValid():
-            source = self._proxy.mapToSource(current)
-            selected = self._model.files[source.row()].metadata.path
+            selected = self._model.files[current.row()].metadata.path
             if metadata is None and selected == self._preview_worker.path:
+                self._preview_status.setText("PREVIEW  ·  UNREADABLE")
                 self._preview.setPlainText("Preview could not be loaded.")
             elif metadata is not None and selected == metadata.path:
                 self._display_selected_file(current.row(), 0, -1, -1, metadata)
@@ -590,36 +323,25 @@ class MyFilesPage(QWidget):
         self._start_preview()
 
     def _filter_rows(self, _text: str = "") -> None:
-        import re
-        search = re.escape(self._search.text().strip())
+        self._search_timer.stop()
+        search = self._search.text().strip().casefold()
         category = self._category_filter.currentText()
-        # Apply category through a source model subset; the proxy handles text and sorting.
         files = self._analyses if category == "All categories" else [
             item for item in self._analyses if item.classification.category == category
         ]
-        if self._model.files != files:
-            self._model.set_files(files)
-        self._proxy.setFilterRegularExpression(search)
-        if self._proxy.rowCount():
-            self._table.setCurrentIndex(self._proxy.index(0, 0))
+        self._model.set_files(files, search)
+        count = self._model.rowCount()
+        known_sizes = [item.metadata.size_bytes for item in self._model.files
+                       if item.metadata.size_bytes is not None]
+        coverage = f" ({len(known_sizes):,}/{count:,} sizes)" if len(known_sizes) != count else ""
+        self._results_label.setText(
+            f"{count:,} of {len(self._analyses):,} files  ·  "
+            f"{_format_size(sum(known_sizes))} known{coverage}"
+        )
+        if count:
+            self._table.setCurrentIndex(self._model.index(0, 0))
         else:
-            self._preview.clear()
-            self.file_details.clear()
-
-
-
-def _format_size(size_bytes: int | None) -> str:
-    if size_bytes is None:
-        return "—"
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-
-    size = float(size_bytes)
-    for unit in ("KB", "MB", "GB", "TB"):
-        size /= 1024
-        if size < 1024 or unit == "TB":
-            return f"{size:.1f} {unit}"
-    return f"{size_bytes} B"
+            self._clear_details()
 
 
 class OrganizerPage(QWidget):
@@ -628,8 +350,8 @@ class OrganizerPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         card = SurfaceCard()
         add_card_heading(
             card.content_layout,
@@ -640,23 +362,22 @@ class OrganizerPage(QWidget):
         self._summary.setWordWrap(True)
         card.content_layout.addWidget(self._summary)
         controls = QHBoxLayout()
-        self._folder_button = QPushButton("Folder names…")
+        self._folder_button = FeedbackButton("Destinations…")
         self._folder_button.setEnabled(False)
         self._folder_button.clicked.connect(self._customize_folder)
         controls.addWidget(self._folder_button)
-        self.exclude_button = QPushButton("Exclude types…")
+        self.exclude_button = FeedbackButton("Exclusions…")
         self.exclude_button.setEnabled(False)
         self.exclude_button.clicked.connect(self._edit_exclusions)
         controls.addWidget(self.exclude_button)
-        self.select_button = QPushButton("Clear selection")
+        self.select_button = FeedbackButton("Clear selection")
         self.select_button.setEnabled(False)
         self.select_button.clicked.connect(self._toggle_selection)
         controls.addWidget(self.select_button)
-        self.apply_button = QPushButton("Apply selected moves")
+        self.apply_button = FeedbackButton("Review moves")
         self.apply_button.setObjectName("ReviewButton")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_requested)
-        controls.addWidget(self.apply_button)
         controls.addStretch(1)
         card.content_layout.addLayout(controls)
         self.model = ProposalModel(self)
@@ -665,19 +386,39 @@ class OrganizerPage(QWidget):
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.horizontalHeader().setDefaultSectionSize(185)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(1, 270)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 225)
+        self.table.setColumnWidth(3, 105)
+        self.table.hideColumn(2)
+        self.table.setMinimumHeight(220)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setShowGrid(False)
         self.table.verticalHeader().hide()
-        card.content_layout.addWidget(self.table, 1)
-        self.route = QLabel("Select a proposal to inspect its full route.")
-        self.route.setTextFormat(Qt.PlainText)
-        self.route.setWordWrap(True)
-        self.route.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.route.setFont(fixed_font())
-        card.content_layout.addWidget(self.route)
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self.table)
+        inspector = SurfaceCard()
+        add_card_heading(inspector.content_layout, "MOVE DETAILS")
+        self.route = detail_label("Select a proposal to inspect its full route.")
+        inspector.content_layout.addWidget(self.route)
+        inspector.content_layout.addStretch()
+        self._splitter.addWidget(inspector)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        self._splitter.setSizes([660, 350])
+        toggle = FeedbackButton("Inspector")
+        toggle.setCheckable(True)
+        toggle.setChecked(True)
+        toggle.toggled.connect(inspector.setVisible)
+        toggle.toggled.connect(lambda visible: reveal(inspector, 160) if visible else None)
+        controls.insertWidget(controls.count() - 1, toggle)
+        card.content_layout.addWidget(self._splitter, 1)
+        footer = QHBoxLayout()
+        footer.addWidget(QLabel("Changes require confirmation"))
+        footer.addStretch()
+        footer.addWidget(self.apply_button)
+        card.content_layout.addLayout(footer)
         self.table.selectionModel().currentRowChanged.connect(self._inspect_route)
         self.model.modelReset.connect(self._inspect_route)
         layout.addWidget(card)
@@ -693,7 +434,11 @@ class OrganizerPage(QWidget):
     def _inspect_route(self, index=None, previous=None):
         if index is not None and index.isValid():
             proposal = self.model.rows[index.row()]
-            self.route.setText(f"FROM   {proposal.current_path}\nTO     {proposal.destination}")
+            status = "; ".join(proposal.conflicts) if proposal.has_conflict else "Ready"
+            self.route.setText(
+                f"FROM\n{proposal.current_path}\n\nTO\n{proposal.destination}"
+                f"\n\nREASON\n{proposal.reason}\n\nSTATUS\n{status}"
+            )
         else:
             self.route.setText("Select a proposal to inspect its full route.")
 
@@ -750,10 +495,14 @@ class OrganizerPage(QWidget):
     def _update_apply(self):
         selected = len(self.selected_proposals())
         self.apply_button.setEnabled(bool(selected))
+        self.apply_button.setText(f"Review {selected:,} moves" if selected else "Review moves")
         self.select_button.setEnabled(any(not row.has_conflict for row in self.model.rows))
         self.select_button.setText("Clear selection" if selected else "Select eligible")
         blocked = sum(row.has_conflict for row in self.model.rows)
-        self._summary.setText(f"{selected:,} selected   ·   {blocked:,} blocked   ·   {self._excluded_count:,} excluded")
+        self._summary.setText(
+            f"{len(self.model.rows):,} proposed   ·   {selected:,} selected   ·   "
+            f"{blocked:,} blocked   ·   {self._excluded_count:,} excluded"
+        )
 
     def selected_proposals(self):
         return tuple(row for row in self.model.rows
@@ -796,7 +545,7 @@ class OrganizerPage(QWidget):
         if generation == self.generation:
             self.model.replace(rows)
             if rows:
-                self.table.selectRow(0)
+                self.table.setCurrentIndex(self.model.index(0, 0))
             if error:
                 self._summary.setText(error)
 
@@ -808,19 +557,20 @@ class DuplicateFinderPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         info_card = SurfaceCard()
         toolbar = QHBoxLayout()
         add_card_heading(
             info_card.content_layout,
             "Exact match detection",
-            "SHA-256 hashes identify exact matches. Similar-looking files are not treated as duplicates.",
+            "Read-only SHA-256 check of files with matching sizes.",
         )
         self._summary = QLabel("Scan a folder before checking for duplicates.")
         self._summary.setObjectName("MutedText")
-        self._find_button = QPushButton("Find duplicates")
+        self._summary.setWordWrap(True)
+        self._find_button = FeedbackButton("Find duplicates")
         self._find_button.setObjectName("PrimaryButton")
         self._find_button.setEnabled(False)
         self._find_button.clicked.connect(self.find_requested.emit)
@@ -847,15 +597,27 @@ class DuplicateFinderPage(QWidget):
         self._tree.setColumnWidth(1, 100)
         self._tree.setColumnWidth(2, 110)
         self._tree.setColumnWidth(3, 300)
+        self._tree.header().moveSection(4, 3)
+        self._tree.setColumnWidth(4, 340)
         self._tree.header().setStretchLastSection(True)
         self._view_stack.addWidget(self._tree)
-        info_card.content_layout.addWidget(self._view_stack)
-        layout.addWidget(info_card)
-        layout.addStretch(1)
+        self._tree.setMinimumHeight(200)
+        info_card.content_layout.addWidget(self._view_stack, 1)
+        self._issues = QTreeWidget()
+        self._issues.setHeaderLabels(("SKIPPED PATH", "REASON"))
+        self._issues.setRootIsDecorated(False)
+        self._issues.setColumnWidth(0, 370)
+        self._issues.setMinimumHeight(105)
+        self._issues.hide()
+        info_card.content_layout.addWidget(self._issues)
+        layout.addWidget(info_card, 1)
 
     def set_scan_available(self, available: bool) -> None:
         self._scan_available = available
         self._find_button.setEnabled(available)
+        self._find_button.setText("Find duplicates")
+        self._issues.clear()
+        self._issues.hide()
         if not available:
             self._tree.clear()
             self._summary.setText("Scan a folder before checking for duplicates.")
@@ -928,8 +690,16 @@ class DuplicateFinderPage(QWidget):
         redundant_bytes = sum(group.redundant_bytes for group in result.groups)
         self._summary.setText(
             f"{len(result.groups)} groups · "
-            f"{_format_size(redundant_bytes)} potentially redundant"
+            f"{_format_size(redundant_bytes)} recoverable (estimate) · "
+            f"{result.files_hashed:,} files hashed · {len(result.issues):,} skipped"
         )
+        self._issues.clear()
+        for issue in result.issues:
+            row = QTreeWidgetItem((str(issue.path), issue.message))
+            row.setToolTip(0, str(issue.path))
+            row.setToolTip(1, issue.message)
+            self._issues.addTopLevelItem(row)
+        self._issues.setVisible(bool(result.issues))
         if result.groups:
             self._view_stack.setCurrentWidget(self._tree)
         else:
@@ -952,14 +722,16 @@ class SettingsPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         card = SurfaceCard()
         add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.3.0")
         note = QLabel("Scans and exact duplicate checks run on this device. Review moves in Organizer and restore them from History.")
         note.setWordWrap(True)
         card.content_layout.addWidget(note)
+        self.reduce_motion = QCheckBox("Reduce motion")
+        card.content_layout.addWidget(self.reduce_motion)
         layout.addWidget(card)
         layout.addStretch(1)
 

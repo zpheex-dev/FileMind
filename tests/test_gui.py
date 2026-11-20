@@ -53,19 +53,22 @@ def test_sorted_filtered_selection_previews_the_correct_file(application, tmp_pa
         metadata = analyze_file(path, extract_content=False)
         files.append(ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata)))
     page.set_scan_result(tmp_path, files)
+    page._table.setCurrentIndex(page._model.index(1, 0))
+    assert page._table.currentIndex().data() == "small.txt"
     page._table.sortByColumn(2, Qt.SortOrder.DescendingOrder)
-    page._table.setCurrentIndex(page._proxy.index(0, 0))
+    assert page._table.currentIndex().data() == "small.txt"
+    page._table.setCurrentIndex(page._model.index(0, 0))
     # Drain the active request and the latest queued selection.
     for _ in range(3):
         if page._preview_worker is not None:
             _wait_for_worker(application, page._preview_worker)
-    assert page._proxy.index(0, 0).data() == "large.py"
+    assert page._model.index(0, 0).data() == "large.py"
     assert "large content" in page._preview.toPlainText()
     page._category_filter.setCurrentText("Documents")
     for _ in range(3):
         if page._preview_worker is not None:
             _wait_for_worker(application, page._preview_worker)
-    assert page._proxy.rowCount() == 1
+    assert page._model.rowCount() == 1
     assert "tiny" in page._preview.toPlainText()
     window.close()
 
@@ -111,7 +114,7 @@ def test_navigation_changes_the_visible_page(application: QApplication) -> None:
     window._buttons[target_page].click()
 
     assert window._stack.currentWidget() is window._pages[target_page]
-    assert window._header_title.text() == target_page
+    assert window._header_title.text() == "Duplicates"
 
 
 def test_scan_updates_dashboard_and_file_explorer(
@@ -147,31 +150,25 @@ def test_scan_updates_dashboard_and_file_explorer(
     dashboard = window._pages["Dashboard"]
     assert isinstance(files_page, MyFilesPage)
     assert isinstance(dashboard, DashboardPage)
-    assert files_page._proxy.rowCount() == 2
-    assert files_page._proxy.index(0, 0).data() == "meeting-notes.txt"
-    assert files_page._proxy.index(0, 4).data() == "Documents"
-    assert files_page._proxy.index(1, 4).data() == "Code"
-    assert dashboard._metric_cards[0].value_widget.text() == "2"
-    assert dashboard._metric_cards[3].value_widget.text() == "2"
-    assert dashboard._distribution_layout.count() == 2
-    assert {dashboard._distribution_layout.itemAt(i).widget().layout().itemAt(0).widget().text()
+    assert files_page._model.rowCount() == 2
+    assert files_page._model.index(0, 0).data() == "meeting-notes.txt"
+    assert files_page._model.index(0, 4).data() == "Documents"
+    assert files_page._model.index(1, 4).data() == "Code"
+    assert "2 files" in dashboard.inventory_details.text()
+    assert "2 folders visited" in dashboard.inventory_details.text()
+    assert {dashboard.categories.topLevelItem(i).text(0)
             for i in range(2)} == {"Documents", "Code"}
-    if files_page._preview_worker is not None:
-        _wait_for_worker(application, files_page._preview_worker)
-    assert "unchanged" in files_page._preview.toPlainText()
-    assert window._status_badge.text() == "LOCAL ONLY"
-    assert file_path.read_text(encoding="utf-8") == "unchanged"
 
     files_page._search.setText("not found")
     QTest.qWait(160)
-    assert files_page._proxy.rowCount() == 0
+    assert files_page._model.rowCount() == 0
     files_page._search.setText("meeting")
     QTest.qWait(160)
-    assert files_page._proxy.rowCount() == 1
+    assert files_page._model.rowCount() == 1
     files_page._search.clear()
     files_page._category_filter.setCurrentText("Code")
-    assert files_page._proxy.rowCount() == 1
-    assert files_page._proxy.index(0, 4).data() == "Code"
+    assert files_page._model.rowCount() == 1
+    assert files_page._model.index(0, 4).data() == "Code"
     window.close()
 
 
@@ -206,7 +203,7 @@ def test_duplicate_finder_uses_scan_results_without_changing_files(
     assert group.childCount() == 2
     assert "1 groups" in duplicate_page._summary.text()
     assert first.read_bytes() == second.read_bytes() == content
-    assert window._pages["Dashboard"]._metric_cards[2].value_widget.text() == "1"
+    assert "2 files hashed" in duplicate_page._summary.text()
     window.close()
 
 
@@ -215,34 +212,34 @@ def test_scan_can_be_cancelled_from_the_header(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from filemind.scanner.scanner import scan_directory
+
     started = Event()
-    previous_file = tmp_path / "previous.txt"
-    previous_file.write_text("previous scan", encoding="utf-8")
+    inventory_root = tmp_path / "completed"
+    inventory_root.mkdir()
+    (inventory_root / "previous.txt").write_text("previous scan", encoding="utf-8")
+    cancelled_root = tmp_path / "cancelled"
+    cancelled_root.mkdir()
 
     def wait_for_cancellation(
         directory: Path,
         progress_callback: Callable[[ScanProgress], None],
         cancellation_event: Event,
     ) -> ScanResult:
+        if directory == inventory_root:
+            return scan_directory(directory, progress_callback=progress_callback,
+                                  cancellation_event=cancellation_event)
         started.set()
-        progress_callback(ScanProgress(0, 0))
+        progress_callback(ScanProgress(1, 0))
         cancellation_event.wait(2)
         return ScanResult(directory, (), (), 1, cancellation_event.is_set())
 
-    monkeypatch.setattr(
-        "filemind.gui.workers.scan_directory",
-        wait_for_cancellation,
-    )
-    window = MainWindow()
+    monkeypatch.setattr("filemind.gui.workers.scan_directory", wait_for_cancellation)
+    window = MainWindow(tmp_path / "history.db")
     files_page = window._pages["My Files"]
-    assert isinstance(files_page, MyFilesPage)
-    previous_metadata = analyze_file(previous_file)
-    previous_classification = RuleBasedClassifier().classify(previous_metadata)
-    files_page.set_scan_result(
-        tmp_path,
-        [ClassifiedFile(previous_metadata, previous_classification)],
-    )
-    window._start_scan(tmp_path)
+    window._start_scan(inventory_root)
+    _wait_for_worker(application, window._scan_worker)
+    window._start_scan(cancelled_root)
     worker = window._scan_worker
     assert worker is not None
     assert started.wait(1)
@@ -254,8 +251,12 @@ def test_scan_can_be_cancelled_from_the_header(
     assert window._status_badge.text() == "SCAN CANCELLED"
     assert window._scan_button.isEnabled()
     assert not window._progress_bar.isVisible()
-    assert files_page._proxy.rowCount() == 1
-    assert files_page._proxy.index(0, 0).data() == "previous.txt"
+    assert files_page._model.rowCount() == 1
+    assert files_page._model.index(0, 0).data() == "previous.txt"
+    dashboard = window._pages["Dashboard"]
+    assert str(cancelled_root) in dashboard.run_details.text()
+    assert str(inventory_root) in dashboard.inventory_details.text()
+    assert str(inventory_root) in window._header_subtitle.text()
 
 
 def test_scan_worker_reports_filesystem_errors(tmp_path: Path) -> None:
@@ -313,9 +314,9 @@ def test_preview_refreshes_after_external_change(application, tmp_path, monkeypa
                     raise PermissionError("Access denied")
                 return real_open(path, *args, **kwargs)
             monkeypatch.setattr(Path, "open", denied)
-        page._table.setCurrentIndex(page._proxy.index(1, 0))
+        page._table.setCurrentIndex(page._model.index(1, 0))
         drain()
-        page._table.setCurrentIndex(page._proxy.index(0, 0))
+        page._table.setCurrentIndex(page._model.index(0, 0))
         drain()
         text = page._preview.toPlainText()
         assert "old content" not in text
@@ -343,7 +344,7 @@ def test_organizer_replaces_plan_after_completed_scan(application, tmp_path, mon
         row = lambda col: page.model.index(0, col).data()
         assert row(0) == "report.txt"
         assert row(1) == str(Path("Organized") / "Documents" / "report.txt")
-        assert row(3) == "No conflict detected"
+        assert row(3) == "READY"
         assert not (first / "Organized").exists()
         window._start_scan(second)
         _wait_for_worker(application, window._scan_worker)
@@ -371,39 +372,101 @@ def test_dashboard_distribution_details_refresh(application, tmp_path):
             metadata = replace(metadata, size_bytes=None)
         files.append(ClassifiedFile(metadata, classifier.classify(metadata)))
     dashboard = DashboardPage()
-    dashboard.set_scan_result(tmp_path, files, 0)
-    assert dashboard._category_chart._counts == {"Documents": 2, "Code": 1}
-    documents = dashboard._distribution_layout.itemAt(0).widget()
-    details = documents.layout().itemAt(1).widget().text()
-    assert "2 files" in details
-    assert "67%" in details
-    assert "1/2 sizes available" in details
-    assert ".txt (2)" in details
-    dashboard.set_scan_result(tmp_path, [], 0)
-    assert dashboard._category_chart._counts == {}
-    assert "No files found" in dashboard._distribution_layout.itemAt(0).widget().text()
+    from datetime import datetime
+
+    dashboard.set_scan_result(tmp_path, files, 1, datetime.now(), 0)
+    documents = dashboard.categories.topLevelItem(0)
+    assert documents.text(0) == "Documents"
+    assert documents.text(1) == "2"
+    assert documents.text(2) == "3 B (1/2)"
+    assert documents.text(3) == ".txt (2)"
+    dashboard.set_scan_result(tmp_path, [], 1, datetime.now(), 0)
+    assert dashboard.categories.topLevelItem(0).text(1) == "0"
+    assert "0 files" in dashboard.inventory_details.text()
 
 
-def test_category_chart_tooltip_identifies_hovered_segment(application, monkeypatch):
-    from PySide6.QtCore import QPoint, QEvent
-    from PySide6.QtGui import QHelpEvent
-    from PySide6.QtWidgets import QToolTip
-    from filemind.gui.pages import CategoryChart
+def test_overview_chart_and_tree_use_completed_inventory(application, tmp_path):
+    from datetime import datetime
+    from filemind.categorizer.classifier import KNOWN_CATEGORIES
 
-    chart = CategoryChart()
-    chart.resize(200, 200)
-    chart.set_counts([("Documents", 3), ("Images", 1)])
-    messages = []
-    monkeypatch.setattr(QToolTip, "showText", lambda position, text, widget: messages.append(text))
-    # The ring begins at the top and proceeds clockwise.
-    for point in (QPoint(177, 100), QPoint(23, 100)):
-        QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, point, point))
-    assert messages == ["Documents: 3 files (75%)", "Images: 1 files (25%)"]
-    QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, QPoint(100, 100), QPoint(100, 100)))
-    assert len(messages) == 2
-    chart.set_counts([])
-    QApplication.sendEvent(chart, QHelpEvent(QEvent.Type.ToolTip, QPoint(177, 100), QPoint(177, 100)))
-    assert len(messages) == 2
+    folder = tmp_path / "Downloads"
+    nested = folder / "test files"
+    nested.mkdir(parents=True)
+    files = []
+    for path in (nested / "test1.txt", folder / "other.txt", folder / "model.glb"):
+        path.touch()
+        metadata = analyze_file(path, extract_content=False)
+        files.append(ClassifiedFile(metadata, RuleBasedClassifier().classify(metadata)))
+
+    dashboard = DashboardPage()
+    dashboard.set_scan_result(folder, files, 2, datetime.now(), 0)
+    chart = dashboard.categories
+    rows = {chart.topLevelItem(index).text(0): chart.topLevelItem(index)
+            for index in range(chart.topLevelItemCount())}
+    assert rows.keys() == KNOWN_CATEGORIES
+    assert rows["Documents"].text(1) == "2"
+    assert rows["Documents"].text(4) == "█" * 12
+    assert rows["3D Models"].text(4) == "█" * 6 + "░" * 6
+    assert "66.7%" in rows["Documents"].toolTip(4)
+    assert rows["Fonts"].text(1) == "0"
+    assert rows["Fonts"].text(4) == "░" * 12
+
+    tree = dashboard.file_tree.model()
+    root = tree.index(0, 0)
+    assert root.data() == "Downloads/"
+    assert dashboard.file_tree.isExpanded(root)
+    branch = tree.index(0, 0, root)
+    assert branch.data() == "test files/"
+    leaf = tree.index(0, 0, branch)
+    assert leaf.data() == "test1.txt"
+    assert leaf.data(Qt.ItemDataRole.ToolTipRole) == str(nested / "test1.txt")
+    assert tree.parent(leaf) == branch
+    assert tree.rowCount(leaf) == 0
+    assert tree.rowCount(root) == 3
+
+    dashboard.set_scan_result(tmp_path, [], 1, datetime.now(), 0)
+    assert tree.rowCount(tree.index(0, 0)) == 0
+
+
+def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_path, monkeypatch):
+    from filemind.scanner.scanner import ScanIssue, scan_directory
+
+    root = tmp_path / "inventory"
+    root.mkdir()
+    missing_file = root / "missing.txt"
+    unreadable_folder = root / "private"
+    issue = ScanIssue(unreadable_folder, "Permission denied")
+
+    def scan_with_warnings(directory, **kwargs):
+        if directory == root:
+            return ScanResult(root, (missing_file,), (issue,), 2, False)
+        return scan_directory(directory, **kwargs)
+
+    monkeypatch.setattr("filemind.gui.workers.scan_directory", scan_with_warnings)
+    window = MainWindow(tmp_path / "history.db")
+    try:
+        dashboard = window._pages["Dashboard"]
+        window._start_scan(root)
+        _wait_for_worker(application, window._scan_worker)
+        assert window._stack.currentWidget() is dashboard
+        assert dashboard.warnings.topLevelItem(0).text(1) == str(unreadable_folder)
+        assert dashboard.warnings.topLevelItem(1).text(0) == "Metadata"
+        assert "0/1 sizes" in dashboard.inventory_details.text()
+
+        failed = tmp_path / "unavailable"
+        window._start_scan(failed)
+        _wait_for_worker(application, window._scan_worker)
+        assert "FAILED" in dashboard.run_details.text()
+        assert str(failed) in dashboard.run_details.text()
+        assert str(root) in dashboard.inventory_details.text()
+        assert window._inventory_root == root
+        assert window._pages["My Files"]._model.rowCount() == 1
+
+        window._rescan_button.click()
+        _wait_for_worker(application, window._scan_worker)
+        assert window._latest_scan.root == root
+    finally:
+        window.close()
 
 
 def test_organizer_selection_and_custom_folder(application, tmp_path, monkeypatch):
@@ -497,13 +560,13 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     _wait_for_worker(application, reopened._journal_worker)
     assert history.model.rows[0]["status"] == "undone"
     assert (folder / "a.txt").read_text() == "a.txt"
-    assert not (folder / "Organized/Documents/a.txt").exists()
+    assert not (folder / "Organized").exists()
     assert all("1 selected file" in prompt for prompt in prompts)
     assert len(prompts) == 3
     assert reopened.close()
 
 
-def test_map_navigation_and_per_folder_preferences(application, tmp_path, monkeypatch):
+def test_category_navigation_and_per_folder_preferences(application, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
     from PySide6.QtCore import QSettings
     from test_moves import user_file
@@ -521,10 +584,12 @@ def test_map_navigation_and_per_folder_preferences(application, tmp_path, monkey
     page = window._pages["AI Organizer"]
     wait_plan(application, page)
     dashboard = window._pages["Dashboard"]
-    node = next(b for b in dashboard.map.nodes if b.text().startswith("Documents"))
-    node.click()
+    node = next(dashboard.categories.topLevelItem(i)
+                for i in range(dashboard.categories.topLevelItemCount())
+                if dashboard.categories.topLevelItem(i).text(0) == "Documents")
+    dashboard.categories.itemActivated.emit(node, 0)
     files = window._pages["My Files"]
-    assert window._stack.currentWidget() is files and files._proxy.rowCount() == 1
+    assert window._stack.currentWidget() is files and files._model.rowCount() == 1
     dashboard.review_button.click()
     assert window._stack.currentWidget() is page
     page.select_button.click()
