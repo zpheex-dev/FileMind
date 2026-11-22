@@ -1,16 +1,23 @@
 """Reusable widgets shared by FileMind pages."""
 
-from PySide6.QtCore import QPropertyAnimation, Qt
+from math import cos, sin, tau
+
+from PySide6.QtCore import QEvent, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QRadialGradient
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStyle,
+    QStyleOptionButton,
     QVBoxLayout,
     QWidget,
 )
 from filemind.gui.icons import navigation_icon
+from filemind.gui.motion import can_animate, tween
+from filemind.gui.theme import ACTIVE, AMBER
 
 
 class SurfaceCard(QFrame):
@@ -20,8 +27,18 @@ class SurfaceCard(QFrame):
         super().__init__(parent)
         self.setObjectName("SurfaceCard")
         self.content_layout = QVBoxLayout(self)
-        self.content_layout.setContentsMargins(12, 10, 12, 10)
-        self.content_layout.setSpacing(8)
+        self.content_layout.setContentsMargins(14, 12, 14, 12)
+        self.content_layout.setSpacing(9)
+
+
+def divider(*, vertical=False):
+    line = QFrame()
+    line.setObjectName("CardDivider")
+    if vertical:
+        line.setFixedWidth(1)
+    else:
+        line.setFixedHeight(1)
+    return line
 
 
 class CardTitle(QWidget):
@@ -78,7 +95,7 @@ class EmptyState(QWidget):
         layout.addWidget(self.description_label)
 
         if action_text:
-            button = QPushButton(action_text)
+            button = FeedbackButton(action_text)
             button.setObjectName("SecondaryButton")
             button.setEnabled(action_enabled)
             layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -94,6 +111,46 @@ class StatusBadge(QLabel):
     def __init__(self, text: str, muted: bool = False) -> None:
         super().__init__(text)
         self.setObjectName("StatusBadgeMuted" if muted else "StatusBadge")
+        self._burst = tween(self, 680, QEasingCurve.Type.OutQuad)
+        self._burst.valueChanged.connect(lambda _: self.update())
+
+    def celebrate(self):
+        if can_animate(self):
+            self._burst.stop()
+            self._burst.start()
+
+    def set_status(self, text, muted):
+        style_name = "StatusBadgeMuted" if muted else "StatusBadge"
+        if text == self.text() and style_name == self.objectName():
+            return
+        self._burst.stop()
+        self.setText(text)
+        if style_name != self.objectName():
+            self.setObjectName(style_name)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not can_animate(self) or self._burst.state() != self._burst.State.Running:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        phase = self._burst.currentValue()
+        painter.setOpacity(1 - phase)
+        colors = (ACTIVE, AMBER, "#d5fae9", "#7bbafa")
+        # Send the particles around the sides of the label, clear of its text.
+        for index in range(12):
+            angle = tau * index / 6
+            center = QPointF(5 if index < 6 else self.width() - 5, self.height() / 2)
+            painter.save()
+            painter.translate(center + QPointF(cos(angle) * 5 * phase, sin(angle) * 11 * phase))
+            painter.rotate(index * 41 + phase * 80)
+            painter.setBrush(QColor(colors[index % len(colors)]))
+            painter.drawRoundedRect(QRectF(-1.4, -2.1, 2.8, 4.2), 0.7, 0.7)
+            painter.restore()
 
 
 def add_card_heading(
@@ -114,8 +171,9 @@ def detail_label(text: str = "") -> QLabel:
                                   Qt.TextInteractionFlag.TextSelectableByKeyboard)
     return label
 
-def reveal(widget, duration, initial_opacity=0.72):
-    if not widget.isVisible() or getattr(widget.window(), "reduce_motion", False):
+
+def reveal(widget, duration, initial_opacity=0.6):
+    if not can_animate(widget):
         return
     effect = QGraphicsOpacityEffect(widget)
     effect.setOpacity(initial_opacity)
@@ -124,11 +182,85 @@ def reveal(widget, duration, initial_opacity=0.72):
     animation.setDuration(duration)
     animation.setStartValue(initial_opacity)
     animation.setEndValue(1.0)
-    animation.finished.connect(lambda: widget.setGraphicsEffect(None))
+    animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+    animation.finished.connect(lambda: effect.setEnabled(False))
     animation.start()
 
 
 class FeedbackButton(QPushButton):
     def __init__(self, text):
         super().__init__(text)
-        self.pressed.connect(lambda: reveal(self, 100, 0.86))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self._pointer = None
+        self._hover = tween(self, 170)
+        self._press = tween(self, 90)
+        for animation in (self._hover, self._press):
+            animation.setEndValue(0.0)
+            animation.valueChanged.connect(lambda _: self.update())
+        self.pressed.connect(lambda: self._press_to(1.0))
+        self.released.connect(lambda: self._press_to(0.0))
+
+    def _press_to(self, depth):
+        self._press.setDuration(80 if depth else 250)
+        self._press.setEasingCurve(QEasingCurve.Type.OutCubic if depth else QEasingCurve.Type.OutBack)
+        self._animate_to(self._press, depth)
+
+    def _animate_to(self, animation, value):
+        animation.stop()
+        animation.setStartValue(animation.currentValue())
+        animation.setEndValue(value)
+        if self.isEnabled() and can_animate(self):
+            animation.start()
+        else:
+            animation.setCurrentTime(animation.duration())
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._pointer = event.position()
+        self._animate_to(self._hover, 1.0)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._animate_to(self._hover, 0.0)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._pointer = event.position()
+        self.update()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange and hasattr(self, "_press"):
+            self._animate_to(self._hover, float(self.underMouse() and self.isEnabled()))
+            self._animate_to(self._press, 0.0)
+
+    def paintEvent(self, event):
+        if not self.isEnabled() or not can_animate(self):
+            super().paintEvent(event)
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.state &= ~QStyle.StateFlag.State_MouseOver
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = QRectF(self.rect()).center()
+        painter.translate(center)
+        scale = 1.0 - self._press.currentValue() * 0.038
+        painter.scale(scale, scale)
+        painter.translate(-center)
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+        strength = self._hover.currentValue()
+        if strength > 0:
+            inset = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            clip = QPainterPath()
+            clip.addRoundedRect(inset, 7, 7)
+            painter.setClipPath(clip)
+            pointer = self._pointer if self._pointer is not None else center
+            light = QRadialGradient(center + (pointer - center) * 0.65, self.width() * 0.75)
+            color = QColor("#ffffff" if self.objectName() == "PrimaryButton" else ACTIVE)
+            color.setAlphaF(0.22 * strength)
+            light.setColorAt(0, color)
+            color.setAlphaF(0.035 * strength)
+            light.setColorAt(1, color)
+            painter.fillRect(inset, light)

@@ -5,7 +5,7 @@ from datetime import datetime
 from time import monotonic
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QSettings, QStandardPaths
+from PySide6.QtCore import QRectF, Qt, QSize, QSettings, QStandardPaths
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -27,6 +26,7 @@ from filemind.analyzer.metadata import FileMetadata
 from filemind.gui.theme import fixed_font
 from filemind.gui.components import FeedbackButton, StatusBadge
 from filemind.gui.icons import navigation_icon
+from filemind.gui.motion import ScanProgress, SnapshotTransition, can_animate
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
 from filemind.gui.history import JournalWorker
@@ -86,7 +86,9 @@ class MainWindow(QMainWindow):
         self._buttons: dict[str, QPushButton] = {}
         self._pages: dict[str, QWidget] = {}
         self._stack = WorkspacePages()
+        self._stack.setObjectName("WorkspacePages")
         self._stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._page_transition = SnapshotTransition(self._stack)
         self._scan_worker: DirectoryScanWorker | None = None
         self._duplicate_worker: DuplicateScanWorker | None = None
         self._scan_files: list[FileMetadata] = []
@@ -117,7 +119,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         narrow = event.size().width() < 940
-        self.rail.setFixedWidth(56 if narrow else 180)
+        self.rail.setFixedWidth(56 if narrow else 185)
         for name, button in self._buttons.items():
             label = PAGE_LABELS.get(name, name)
             button.setText("" if narrow else label)
@@ -130,7 +132,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(180)
+        sidebar.setFixedWidth(185)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(8, 24, 8, 12)
         layout.setSpacing(4)
@@ -142,7 +144,6 @@ class MainWindow(QMainWindow):
             button.setIconSize(QSize(17, 17))
             button.setObjectName("NavButton")
             button.setCheckable(True)
-            button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, name=title: self._show_page(name))
             self._buttons[title] = button
             layout.addWidget(button)
@@ -164,7 +165,7 @@ class MainWindow(QMainWindow):
         page_container = QWidget()
         page_container.setObjectName("PageContainer")
         page_layout = QVBoxLayout(page_container)
-        page_layout.setContentsMargins(20, 18, 20, 16)
+        page_layout.setContentsMargins(22, 21, 17, 16)
         page_layout.setSpacing(0)
 
         for page_name, page_factory in PAGE_FACTORIES.items():
@@ -199,6 +200,11 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(header)
         layout.setContentsMargins(18, 8, 18, 8)
 
+        icon = self.windowIcon()
+        if not icon.isNull():
+            brand_icon = QLabel()
+            brand_icon.setPixmap(icon.pixmap(QSize(28, 28), self.devicePixelRatioF()))
+            layout.addWidget(brand_icon)
         brand = QLabel("FileMind")
         brand.setObjectName("BrandName")
         layout.addWidget(brand)
@@ -221,18 +227,13 @@ class MainWindow(QMainWindow):
         self._rescan_button = FeedbackButton("Rescan")
         self._rescan_button.setEnabled(False)
         self._rescan_button.clicked.connect(self._rescan)
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setObjectName("ScanProgress")
-        self._progress_bar.setTextVisible(False)
-        self._progress_bar.setFixedWidth(110)
-        self._progress_bar.setMaximumHeight(8)
-        self._progress_bar.hide()
+        self._progress_bar = ScanProgress()
         self._scan_button = FeedbackButton("Choose folder")
         self._scan_button.setObjectName("PrimaryButton")
         self._scan_button.clicked.connect(self._handle_scan_button)
         self._scan_button.setShortcut("Ctrl+O")
         self._scan_button.setToolTip("Choose a folder or cancel the current scan (Ctrl+O)")
-        layout.addWidget(self._status_badge)
+        layout.addWidget(self._status_badge, 0, Qt.AlignVCenter)
         layout.addWidget(self._progress_bar)
         layout.addWidget(self._rescan_button)
         layout.addWidget(self._scan_button)
@@ -241,12 +242,24 @@ class MainWindow(QMainWindow):
 
     def _show_page(self, page_name: str) -> None:
         page = self._pages[page_name]
+        previous = self._stack.currentIndex()
+        current = self._stack.indexOf(page)
+        snapshot = None
+        if current != previous and can_animate(self._stack):
+            self._page_transition.clear()
+            area = self._stack.visibleRegion().boundingRect()
+            if not area.isEmpty():
+                snapshot = self._stack.grab(area)
         self._stack.setCurrentWidget(page)
         self._stack.updateGeometry()
         self._header_title.setText(PAGE_LABELS.get(page_name, page_name).replace("&&", "&"))
         self._show_root()
         for name, button in self._buttons.items():
             button.setChecked(name == page_name)
+        if snapshot is not None:
+            start = QRectF(area)
+            end = start.translated(-20 if current > previous else 20, 0)
+            self._page_transition.play(snapshot, start, end, soften=True)
 
     def _show_root(self):
         root = self._inventory_root
@@ -263,8 +276,13 @@ class MainWindow(QMainWindow):
     def _set_reduce_motion(self, enabled):
         self.reduce_motion = enabled
         self._appearance.setValue("reduceMotion", enabled)
-        if self._scan_worker is not None and self._progress_bar.maximum() == 0:
-            self._progress_bar.setVisible(not enabled)
+        for progress in self.findChildren(ScanProgress):
+            progress.refresh_motion()
+        self._pages["Dashboard"].scan_artwork.refresh_motion()
+        if enabled:
+            for transition in self.findChildren(SnapshotTransition):
+                transition.clear()
+            self._status_badge.update()
 
     def _confirm_moves(self, verb, count):
         dialog = QMessageBox(self)
@@ -383,8 +401,7 @@ class MainWindow(QMainWindow):
         self._pages["Activity History"].setEnabled(False)
         self._scan_button.setText("Cancel scan")
         self._scan_button.setEnabled(True)
-        self._progress_bar.setRange(0, 0)
-        self._progress_bar.setVisible(not self.reduce_motion)
+        self._progress_bar.begin()
         self._set_status("SCANNING", muted=False)
 
         dashboard = self._pages["Dashboard"]
@@ -400,9 +417,7 @@ class MainWindow(QMainWindow):
             attempt.discovered = total
             attempt.processed = current
             if total:
-                self._progress_bar.setRange(0, total)
-                self._progress_bar.setValue(current)
-                self._progress_bar.show()
+                self._progress_bar.report(current, total)
             progress = f"Metadata  ·  {current:,} of {total:,} files processed"
         else:
             attempt.discovered = current
@@ -446,10 +461,10 @@ class MainWindow(QMainWindow):
         self._pages["My Files"].set_scan_result(directory, files)
         self._pages["AI Organizer"].set_scan_result(directory, files)
         self._pages["Duplicate Finder"].set_scan_available(True)
-        if self._stack.currentWidget() is dashboard and not warnings:
-            self._show_page("My Files")
         self._show_root()
         self._set_status("SCAN WARNINGS" if warnings else "LOCAL ONLY", muted=bool(warnings))
+        if files and not warnings:
+            self._status_badge.celebrate()
         self.statusBar().showMessage(
             f"Scan complete  ·  {len(files):,} files  ·  {attempt.folders:,} folders visited"
             f"  ·  {warnings:,} warnings"
@@ -494,9 +509,7 @@ class MainWindow(QMainWindow):
         self._rescan_button.setEnabled(False)
         self._pages["AI Organizer"].setEnabled(False)
         self._pages["Activity History"].setEnabled(False)
-        self._progress_bar.setRange(0, 1000)
-        self._progress_bar.setValue(0)
-        self._progress_bar.show()
+        self._progress_bar.begin(1000)
         self._set_status("HASHING", muted=True)
 
         duplicate_page = self._pages["Duplicate Finder"]
@@ -514,7 +527,7 @@ class MainWindow(QMainWindow):
             value = int(progress.files_processed * 1000 / progress.total_files)
         else:
             value = 0
-        self._progress_bar.setValue(min(value, 1000))
+        self._progress_bar.report(min(value, 1000), 1000)
         self._set_status("HASHING", muted=True)
 
     def _on_duplicate_completed(self, result: DuplicateResult) -> None:
@@ -571,12 +584,7 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str, muted: bool) -> None:
         self.statusBar().showMessage(f"{len(self._scan_files):,} files in workspace   ·   {text}")
-        self._status_badge.setText(text)
-        self._status_badge.setObjectName(
-            "StatusBadgeMuted" if muted else "StatusBadge"
-        )
-        self._status_badge.style().unpolish(self._status_badge)
-        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.set_status(text, muted)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._journal_worker is not None:

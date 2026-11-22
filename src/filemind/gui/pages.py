@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer, QSettings, QUrl
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -32,7 +32,9 @@ from PySide6.QtWidgets import (
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel, format_size as _format_size
+from filemind.gui.motion import SnapshotTransition, can_animate
 from filemind.gui.scan_report import DashboardPage
+from filemind.gui.theme import fixed_font
 from filemind.gui.workers import PreviewWorker
 
 from filemind.gui.components import (
@@ -115,16 +117,18 @@ class MyFilesPage(QWidget):
         self._preview_card = SurfaceCard()
         add_card_heading(
             self._preview_card.content_layout,
-            "FILE INSPECTOR",
+            "File inspector",
         )
         self._preview = QPlainTextEdit()
         self._preview.setObjectName("ContentPreview")
+        self._preview.setFont(fixed_font())
         self._preview.setReadOnly(True)
         self._preview.setPlaceholderText("Select a file to preview its text.")
         self._preview.setMinimumHeight(105)
         self._file_name = detail_label()
         self._file_name.setObjectName("CardTitle")
         self.file_details = detail_label()
+        self.file_details.setFont(fixed_font())
         self._preview_status = QLabel("Select a file")
         self._preview_status.setObjectName("SectionCaption")
         self._copy = FeedbackButton("Copy path")
@@ -154,6 +158,7 @@ class MyFilesPage(QWidget):
         self._splitter.setStretchFactor(1, 2)
         self._splitter.setSizes([680, 420])
         layout.addWidget(self._splitter, 1)
+        self._file_transition = SnapshotTransition(self)
 
         self._table.selectionModel().currentRowChanged.connect(
             lambda current, previous: self._display_selected_file(current.row(), 0, previous.row(), 0)
@@ -166,6 +171,7 @@ class MyFilesPage(QWidget):
         self._category_filter.currentTextChanged.connect(self._filter_rows)
 
     def _toggle_inspector(self, visible):
+        self._file_transition.clear()
         self._preview_card.setVisible(visible)
         if visible:
             reveal(self._preview_card, 160)
@@ -180,6 +186,7 @@ class MyFilesPage(QWidget):
             QMessageBox.warning(self, "Could not open folder", str(path.parent))
 
     def _clear_details(self):
+        self._file_transition.clear()
         self._selected_path = None
         self._pending_preview = None
         self._copy.setEnabled(False)
@@ -227,7 +234,7 @@ class MyFilesPage(QWidget):
         self,
         row: int,
         _column: int,
-        _previous_row: int,
+        previous_row: int,
         _previous_column: int,
         preview_metadata=None,
     ) -> None:
@@ -239,6 +246,8 @@ class MyFilesPage(QWidget):
         scanned = classified_file.metadata
         metadata = preview_metadata if preview_metadata is not None else scanned
         classification = classified_file.classification
+        changed_selection = (preview_metadata is None and previous_row >= 0
+                             and self._selected_path != scanned.path)
         self._selected_path = scanned.path
         self._file_name.setText(scanned.name)
         self._copy.setEnabled(True)
@@ -268,6 +277,8 @@ class MyFilesPage(QWidget):
             details.append(f"Scan issue  {scanned.analysis_error}")
         self.file_details.setText("\n".join(details))
         if preview_metadata is None:
+            if changed_selection:
+                self._animate_file_name(row, scanned.name)
             self._preview_status.setText("PREVIEW  ·  LOADING")
             self._preview.clear()
             self._pending_preview = metadata.path
@@ -285,6 +296,27 @@ class MyFilesPage(QWidget):
             text = metadata.analysis_error or "Content could not be analyzed."
         self._preview_status.setText(f"PREVIEW  ·  {status.upper()}")
         self._preview.setPlainText(text)
+        reveal(self._preview.viewport(), 160, 0.7)
+
+    def _animate_file_name(self, row, name):
+        self._file_transition.clear()
+        if not can_animate(self._file_name):
+            return
+        viewport = self._table.viewport()
+        cell = self._table.visualRect(self._model.index(row, 0))
+        metrics = self._table.fontMetrics()
+        cell.setWidth(min(cell.width(), metrics.horizontalAdvance(name) + 10))
+        cell.adjust(0, 4, 0, -4)
+        cell = cell.intersected(viewport.rect())
+        if cell.isEmpty():
+            return
+        start = QRectF(cell.translated(viewport.mapTo(self, QPoint())))
+        title = self._file_name
+        end = QRectF(title.rect())
+        end.moveTopLeft(title.mapTo(self, QPoint()))
+        end.setWidth(min(end.width(), title.fontMetrics().horizontalAdvance(name) + 12))
+        self._file_transition.play(viewport.grab(cell), start, end)
+        reveal(title, 240, 0.35)
 
     def _start_preview(self):
         if self._closing or self._preview_worker is not None or self._pending_preview is None:
@@ -399,7 +431,7 @@ class OrganizerPage(QWidget):
         self._splitter.setChildrenCollapsible(False)
         self._splitter.addWidget(self.table)
         inspector = SurfaceCard()
-        add_card_heading(inspector.content_layout, "MOVE DETAILS")
+        add_card_heading(inspector.content_layout, "Move details")
         self.route = detail_label("Select a proposal to inspect its full route.")
         inspector.content_layout.addWidget(self.route)
         inspector.content_layout.addStretch()

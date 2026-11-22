@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer
 from PySide6.QtGui import QIcon
 
-from filemind.gui.theme import APP_STYLESHEET, fixed_font, workspace_palette
+from filemind.gui.theme import APP_STYLESHEET, workspace_palette
 from filemind.gui.window import MainWindow
 
 
@@ -18,7 +18,6 @@ def main() -> int:
     application.setWindowIcon(QIcon(str(files("filemind.gui").joinpath("assets", "filemind.svg"))))
     application.setOrganizationName("FileMind")
     application.setStyle("Fusion")
-    application.setFont(fixed_font())
     application.setPalette(workspace_palette())
     application.setStyleSheet(APP_STYLESHEET)
 
