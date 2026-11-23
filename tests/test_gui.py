@@ -7,9 +7,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from shiboken6 import isValid
-from PySide6.QtCore import QEventLoop, QThread, QTimer, Qt
+from PySide6.QtCore import QAbstractAnimation, QEventLoop, QSettings, QThread, QTimer, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from filemind.analyzer.metadata import analyze_file
 from filemind.categorizer.classifier import ClassifiedFile, RuleBasedClassifier
@@ -117,6 +117,33 @@ def test_navigation_changes_the_visible_page(application: QApplication) -> None:
     assert window._header_title.text() == "Duplicates"
 
 
+def test_reduce_motion_stops_transitions_and_keeps_scan_progress(application, tmp_path):
+    window = MainWindow(tmp_path / "history.db")
+    window._appearance = QSettings(str(tmp_path / "appearance.ini"), QSettings.Format.IniFormat)
+    preference = window._pages["Settings"].reduce_motion
+    preference.setChecked(False)
+    window.show()
+    application.processEvents()
+
+    progress = window._progress_bar
+    progress.begin()
+    assert progress._sweep.state() == QAbstractAnimation.State.Running
+    window._buttons["My Files"].click()
+    window._buttons["Settings"].click()
+    assert window._stack.currentWidget() is window._pages["Settings"]
+    assert window._page_transition.isVisible()
+
+    preference.setChecked(True)
+    assert progress.isVisible()
+    assert progress._sweep.state() == QAbstractAnimation.State.Stopped
+    assert not window._page_transition.isVisible()
+    progress.report(3, 12)
+    assert progress.value() == 3
+    preference.setChecked(False)
+    assert progress._fill.currentValue() == 0.25
+    progress.hide()
+
+
 def test_scan_updates_dashboard_and_file_explorer(
     application: QApplication,
     tmp_path: Path,
@@ -150,6 +177,9 @@ def test_scan_updates_dashboard_and_file_explorer(
     dashboard = window._pages["Dashboard"]
     assert isinstance(files_page, MyFilesPage)
     assert isinstance(dashboard, DashboardPage)
+    assert window._stack.currentWidget() is dashboard
+    assert dashboard.scan_status.text() == "✓ Completed"
+    assert dashboard.metadata_count.text() == "2 / 2"
     assert files_page._model.rowCount() == 2
     assert files_page._model.index(0, 0).data() == "meeting-notes.txt"
     assert files_page._model.index(0, 4).data() == "Documents"
@@ -158,6 +188,8 @@ def test_scan_updates_dashboard_and_file_explorer(
     assert "2 folders visited" in dashboard.inventory_details.text()
     assert {dashboard.categories.topLevelItem(i).text(0)
             for i in range(2)} == {"Documents", "Code"}
+    dashboard.browse_button.click()
+    assert window._stack.currentWidget() is files_page
 
     files_page._search.setText("not found")
     QTest.qWait(160)
@@ -380,9 +412,24 @@ def test_dashboard_distribution_details_refresh(application, tmp_path):
     assert documents.text(1) == "2"
     assert documents.text(2) == "3 B (1/2)"
     assert documents.text(3) == ".txt (2)"
+    graphs = dashboard.graphs
+    assert graphs.canvas.mode == "Donut"
+    assert graphs.canvas.total_label == "7 B"
+    assert graphs.legend.topLevelItem(0).text(0) == "Code"
+    assert graphs.insight.text() == "Code uses 57% of\nscanned storage"
+    controls = {button.text(): button for button in graphs.findChildren(QPushButton)}
+    controls["File count"].click()
+    assert graphs.canvas.total_label == "3"
+    assert graphs.legend.topLevelItem(0).text(0) == "Documents"
+    assert graphs.insight.text() == "67% of scanned files\nare in Documents"
+    for mode in ("Bar", "Treemap"):
+        controls[mode].click()
+        assert graphs.canvas.mode == mode
     dashboard.set_scan_result(tmp_path, [], 1, datetime.now(), 0)
     assert dashboard.categories.topLevelItem(0).text(1) == "0"
     assert "0 files" in dashboard.inventory_details.text()
+    assert graphs.canvas.entries == []
+    assert "No files" in graphs.empty.text()
 
 
 def test_overview_chart_and_tree_use_completed_inventory(application, tmp_path):
@@ -456,7 +503,8 @@ def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_p
         failed = tmp_path / "unavailable"
         window._start_scan(failed)
         _wait_for_worker(application, window._scan_worker)
-        assert "FAILED" in dashboard.run_details.text()
+        assert dashboard.scan_status.text() == "Failed"
+        assert dashboard.run_error.text()
         assert str(failed) in dashboard.run_details.text()
         assert str(root) in dashboard.inventory_details.text()
         assert window._inventory_root == root
