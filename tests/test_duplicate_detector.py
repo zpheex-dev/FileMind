@@ -229,3 +229,17 @@ def test_replaced_candidate_with_preserved_timestamp(tmp_path):
     result = find_duplicates(metadata)
     assert not result.groups and result.files_hashed == 1
     assert [issue.path for issue in result.issues] == paths[1:2]
+
+def test_cancel_from_last_progress(tmp_path):
+    files = [tmp_path / name for name in ("a", "b")]
+    for path in files:
+        path.write_bytes(b"same")
+    cancel = Event()
+
+    def progress(update):
+        if update.files_processed == update.total_files:
+            cancel.set()
+
+    result = find_duplicates(map(analyze_file, files), progress_callback=progress,
+                             cancellation_event=cancel)
+    assert result.cancelled and not result.groups and result.files_hashed == 2

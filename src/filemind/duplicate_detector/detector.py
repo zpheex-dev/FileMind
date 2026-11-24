@@ -178,6 +178,8 @@ def find_duplicates(
 
     groups = []
     for (size_bytes, checksum), matching_files in hashes.items():
+        if cancellation_event is not None and cancellation_event.is_set():
+            return DuplicateResult((), tuple(issues), files_hashed, True)
         if len(matching_files) < 2:
             continue
         matching_files.sort(key=lambda item: item.path.as_posix().casefold())
@@ -193,6 +195,8 @@ def find_duplicates(
     groups.sort(
         key=lambda group: (-group.redundant_bytes, group.sha256)
     )
+    if cancellation_event is not None and cancellation_event.is_set():
+        return DuplicateResult((), tuple(issues), files_hashed, True)
     return DuplicateResult(
         groups=tuple(groups),
         issues=tuple(issues),

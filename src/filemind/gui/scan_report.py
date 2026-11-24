@@ -152,6 +152,7 @@ class DashboardPage(QWidget):
         layout.addWidget(self.run_panel)
 
         self.graphs = InventoryGraphs()
+        self.graphs.canvas.category_requested.connect(self.category_requested)
         self.graphs.hide()
         layout.addWidget(self.graphs)
 

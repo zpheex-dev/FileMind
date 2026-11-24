@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -29,6 +30,9 @@ from filemind.gui.icons import navigation_icon
 from filemind.gui.motion import ScanProgress, SnapshotTransition, can_animate
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
+from filemind.database.inventory import inventory
+from filemind.gui.inventory_tools import ComparisonDialog, SearchDialog
+from filemind.gui.cleanup import CleanupDialog
 from filemind.gui.history import JournalWorker
 from filemind.organizer.organizer import MoveJournal
 from filemind.gui.pages import (
@@ -183,6 +187,14 @@ class MainWindow(QMainWindow):
         if isinstance(duplicate_page, DuplicateFinderPage):
             duplicate_page.find_requested.connect(self._handle_duplicate_button)
 
+        tool_button = self._pages["My Files"].tools_button
+        menu = QMenu(tool_button)
+        menu.addAction("Snapshots and folder comparison…", self._compare_inventory)
+        menu.addAction("Search file contents…", self._content_search)
+        menu.addAction("Cleanup…", self._cleanup)
+        menu.addAction("Verified copy of selected file…", lambda: self._transfer("copy"))
+        menu.addAction("Verified move of selected file…", lambda: self._transfer("move"))
+        tool_button.setMenu(menu)
         motion = self._pages["Settings"].reduce_motion
         motion.setChecked(self.reduce_motion)
         motion.toggled.connect(self._set_reduce_motion)
@@ -284,15 +296,16 @@ class MainWindow(QMainWindow):
                 transition.clear()
             self._status_badge.update()
 
-    def _confirm_moves(self, verb, count):
+    def _confirm_moves(self, verb, count, details):
         dialog = QMessageBox(self)
         dialog.setWindowTitle(f"{verb} selected moves")
-        dialog.setText(f"{verb} {count:,} selected file move(s)?")
-        dialog.setInformativeText("Restore the selected files to their recorded original paths."
+        dialog.setText(f"{verb} {count:,} selected file operation(s)?")
+        dialog.setDetailedText(details)
+        dialog.setInformativeText("Undo a move restores the original. Undo a copy removes the destination after verifying the original."
                                   if verb == "Undo" else
                                   "Move the selected files to their proposed destinations. You can undo completed moves in History & undo.")
         cancel = dialog.addButton(QMessageBox.Cancel)
-        accept = dialog.addButton(f"{verb} moves", QMessageBox.AcceptRole)
+        accept = dialog.addButton(verb, QMessageBox.AcceptRole)
         accept.setObjectName("ReviewButton")
         dialog.setDefaultButton(cancel)
         dialog.setEscapeButton(cancel)
@@ -302,12 +315,17 @@ class MainWindow(QMainWindow):
     def _apply_moves(self):
         page = self._pages["AI Organizer"]
         selected = page.selected_proposals()
-        if selected and self._confirm_moves("Apply", len(selected)):
-            metadata = {item.metadata.path: item.metadata for item in page._files}
-            self._run_journal("apply", page._directory, selected, metadata)
+        root = page._directory
+        metadata = {item.metadata.path: item.metadata for item in page._files}
+        details = "\n".join(f"{p.current_path} → {p.destination}" for p in selected)
+        if selected and self._confirm_moves("Apply", len(selected), details):
+            self._run_journal("apply", root, selected, metadata)
 
     def _undo_moves(self, ids):
-        if ids and self._confirm_moves("Undo", len(ids)):
+        selected = set(ids)
+        rows = self._pages["Activity History"].model.rows
+        details = "\n".join(f"{r['status']}: {r['original']} → {r['destination']}" for r in rows if r["id"] in selected)
+        if ids and self._confirm_moves("Undo", len(ids), details):
             self._run_journal("undo", ids)
 
     def _run_journal(self, action, *args):
@@ -338,6 +356,53 @@ class MainWindow(QMainWindow):
             if directory is not None:
                 self._start_scan(directory)
         worker.deleteLater()
+
+    def _inventory_view(self):
+        return inventory(self._inventory_root, self._scan_files, self._inventory_issues)
+
+    def _compare_inventory(self):
+        dialog = ComparisonDialog(self, self._inventory_view(), self._journal.database.with_name("inventory.sqlite3"))
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _transfer(self, kind):
+        page = self._pages["My Files"]
+        index = page._table.currentIndex()
+        if not index.isValid():
+            self.statusBar().showMessage("Select a file in My Files first")
+            return
+        record = page._model.files[index.row()].metadata
+        folder = QFileDialog.getExistingDirectory(self, f"Destination for verified {kind}")
+        if not folder:
+            return
+        dest = Path(folder) / record.name
+        if QMessageBox.question(self, f"Confirm verified {kind}",
+                f"{kind.capitalize()} {record.path}\n\nto {dest}?", QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) == QMessageBox.Yes:
+            self._run_journal("transfer", record.path, dest, record, kind)
+
+    def _cleanup(self):
+        downloads = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
+        dialog = CleanupDialog(self, self._inventory_root, self._scan_files, Path(downloads) if downloads else None,
+                               self._journal)
+        dialog.exec()
+        if dialog.changed:
+            self._rescan()
+        dialog.deleteLater()
+
+    def _content_search(self):
+        dialog = SearchDialog(self, self._inventory_view(), self._journal.database.with_name("inventory.sqlite3"))
+        if dialog.exec() and dialog.path:
+            page = self._pages["My Files"]
+            page._search.clear()
+            page._category_filter.setCurrentIndex(0)
+            page._filter_rows()
+            for row, item in enumerate(page._model.files):
+                if item.metadata.path == dialog.path:
+                    page.inspector_toggle.setChecked(True)
+                    page._table.setCurrentIndex(page._model.index(row, 0))
+                    break
+        dialog.deleteLater()
 
     def _browse_category(self, category):
         page = self._pages["My Files"]
@@ -396,6 +461,7 @@ class MainWindow(QMainWindow):
         worker.cancelled.connect(self._on_scan_cancelled)
         worker.finished.connect(self._on_scan_worker_finished)
         self._scan_worker = worker
+        self._pages["My Files"].tools_button.setEnabled(False)
         self._pages["Duplicate Finder"]._find_button.setEnabled(False)
         self._pages["AI Organizer"].setEnabled(False)
         self._pages["Activity History"].setEnabled(False)
@@ -455,6 +521,7 @@ class MainWindow(QMainWindow):
         attempt = self._finish_scan_attempt("Completed with warnings" if warnings else "Completed")
         dashboard = self._pages["Dashboard"]
         dashboard.set_scan_result(directory, files, attempt.folders, attempt.finished, warnings)
+        self._inventory_issues = issues
         self._inventory_root = directory
         self._scan_files = [item.metadata for item in files]
         self._has_scan = True
@@ -505,6 +572,7 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_duplicate_failed)
         worker.finished.connect(self._on_duplicate_worker_finished)
         self._duplicate_worker = worker
+        self._pages["My Files"].tools_button.setEnabled(False)
         self._scan_button.setEnabled(False)
         self._rescan_button.setEnabled(False)
         self._pages["AI Organizer"].setEnabled(False)
@@ -562,6 +630,7 @@ class MainWindow(QMainWindow):
         self._pages["AI Organizer"].setEnabled(True)
         self._pages["Activity History"].setEnabled(True)
         self._duplicate_worker = None
+        self._pages["My Files"].tools_button.setEnabled(self._has_scan)
         self._scan_button.setEnabled(True)
         self._rescan_button.setEnabled(self._latest_scan is not None)
         self._progress_bar.hide()
@@ -573,6 +642,7 @@ class MainWindow(QMainWindow):
         self._pages["AI Organizer"].setEnabled(True)
         self._pages["Activity History"].setEnabled(True)
         self._scan_worker = None
+        self._pages["My Files"].tools_button.setEnabled(self._has_scan)
         self._pages["Duplicate Finder"]._find_button.setEnabled(self._has_scan)
         self._scan_button.setEnabled(True)
         self._scan_button.setText("Choose folder")

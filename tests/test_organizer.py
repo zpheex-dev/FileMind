@@ -118,3 +118,27 @@ def test_custom_category_folders_recheck_conflicts_and_validate_names(tmp_path):
     for unsafe in ("../escape", "/absolute", ".", "bad\\name", "bad:folder", "trailing.", "bad*name", ".private", "con.txt", "LPT1"):
         with pytest.raises(ValueError):
             propose_organization(tmp_path, files, {"Documents": unsafe})
+
+
+def test_ordered_rules_and_renamed_nested_undo(tmp_path):
+    from filemind.organizer.organizer import MoveJournal
+    root = tmp_path / "Downloads"
+    source = root / "mail" / "invoice.txt"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"bill")
+    files = classified_scan(root)
+    record = files[0].metadata
+    rule = dict(name="Invoices", extension="TXT", pattern="inv*.txt", age_days="0",
+                size_bytes="4", source="mail", destination="Documents/Invoices/<year>")
+    rules = [rule, dict(name="Other", destination="Second")]
+    plan = propose_organization(root, files, rules=rules, filenames={source: "paid.txt"})
+    dest = root / "Organized" / "Documents" / "Invoices" / str(record.modified_at.year) / "paid.txt"
+    assert plan[0].destination == dest and "Invoices" in plan[0].reason
+    journal = MoveJournal(tmp_path / "journal.db")
+    journal.apply(root, plan, {source: record})
+    assert dest.read_bytes() == b"bill" and not source.exists()
+    journal.undo([journal.history()[0]["id"]])
+    assert source.read_bytes() == b"bill" and not (root / "Organized").exists()
+    for key, value in (("extension", "pdf"), ("pattern", "x*"), ("age_days", "30"),
+                       ("size_bytes", "5"), ("source", "archive")):
+        assert propose_organization(root, files, rules=[{**rule, key: value}])[0].destination.parent.name == "Documents"

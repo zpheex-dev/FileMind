@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from filemind.organizer import transfers
 from filemind.organizer.filesystem import (
     FILE_ERRORS, digest, directory_identity, move, parent_handle, personal_parts,
     remove_empty_directory,
@@ -50,6 +51,7 @@ class MoveJournal:
             created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
         db.execute("""CREATE TABLE IF NOT EXISTS created_folders (
             path TEXT PRIMARY KEY, identity TEXT NOT NULL)""")
+        transfers.schema(db)
         return db
 
     @contextmanager
@@ -113,9 +115,16 @@ class MoveJournal:
                 self._finish(db, row["id"], undo=False)
         return batch
 
+    def transfer(self, source, destination, metadata, kind):
+        with self._session() as db:
+            return transfers.start(db, source, destination, metadata, kind)
+
     def undo(self, ids):
         with self._session() as db:
             for entry_id in ids:
+                if db.execute('SELECT 1 FROM transfers WHERE id=?', (entry_id,)).fetchone():
+                    transfers.undo(db, entry_id)
+                    continue
                 with db:
                     eligible = db.execute("UPDATE moves SET status='undoing',reason='' WHERE id=? AND status='moved'",
                                           (entry_id,)).rowcount
@@ -127,9 +136,10 @@ class MoveJournal:
             db.execute("INSERT OR REPLACE INTO created_folders VALUES (?,?)",
                        (_stored_text(os.path.normcase(path)), json.dumps(directory_identity(info))))
 
-    def _remove_empty_folders(self, db, category):
-        # Walk only the two destination levels. Existing user folders have no record.
-        for folder in (category, category.parent):
+    def _remove_empty_folders(self, db, category, root):
+        for folder in (category, *category.parents):
+            if not folder.is_relative_to(root / "Organized"):
+                break
             key = _stored_text(os.path.normcase(folder))
             record = db.execute("SELECT identity FROM created_folders WHERE path=?", (key,)).fetchone()
             if record is None:
@@ -167,7 +177,7 @@ class MoveJournal:
             else:
                 status, reason = ("undone" if undo else "moved"), ""
                 if undo:
-                    self._remove_empty_folders(db, destination.parent)
+                    self._remove_empty_folders(db, destination.parent, Path(row["root"]))
             db.execute("UPDATE moves SET status=?,reason=? WHERE id=?", (status, _stored_text(reason), entry_id))
 
     def _location(self, path, row):
@@ -185,6 +195,9 @@ class MoveJournal:
         try:
             with self._session() as db, db:
                 self._recover(db)
+                db.commit()
+                for row in db.execute("SELECT id FROM moves WHERE status='transfer pending'").fetchall():
+                    transfers.recover(db, row['id'])
         except JournalBusyError:
             # The other instance still owns its intents.
             return
@@ -202,7 +215,6 @@ class MoveJournal:
                 status = "needs review"
             if status == "undone":
                 category = Path(row["destination"]).parent
-                if category.parent == Path(row["root"]) / "Organized":
-                    self._remove_empty_folders(db, category)
+                self._remove_empty_folders(db, category, Path(row["root"]))
             db.execute("UPDATE moves SET status=?,reason='Recovered after interruption' WHERE id=?",
                        (status, row["id"]))

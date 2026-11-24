@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemind.gui.rule_editor import edit_rules
+from filemind.organizer.rules import validate_destination, validate_folder
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel, format_size as _format_size
@@ -68,6 +70,9 @@ class MyFilesPage(QWidget):
         self._results_label.setObjectName("MutedText")
         toolbar.addWidget(self._search, 1)
         toolbar.addWidget(self._category_filter)
+        self.tools_button = FeedbackButton('Tools')
+        self.tools_button.setEnabled(False)
+        toolbar.addWidget(self.tools_button)
         self._results_label.setWordWrap(True)
         layout.addLayout(toolbar)
         layout.addWidget(self._results_label)
@@ -202,6 +207,7 @@ class MyFilesPage(QWidget):
         files: list[ClassifiedFile],
     ) -> None:
         self._analyses = files
+        self.tools_button.setEnabled(True)
         self._generation += 1
         self._preview_cache.clear()
         self._pending_preview = None
@@ -402,6 +408,13 @@ class OrganizerPage(QWidget):
         self.exclude_button.setEnabled(False)
         self.exclude_button.clicked.connect(self._edit_exclusions)
         controls.addWidget(self.exclude_button)
+        self.rules_button = FeedbackButton("Rules…")
+        self.rules_button.setEnabled(False)
+        self.rules_button.clicked.connect(self._edit_rules)
+        controls.addWidget(self.rules_button)
+        self.blocked = QCheckBox("Blocked only")
+        self.blocked.toggled.connect(self._filter_proposals)
+        controls.addWidget(self.blocked)
         self.select_button = FeedbackButton("Clear selection")
         self.select_button.setEnabled(False)
         self.select_button.clicked.connect(self._toggle_selection)
@@ -434,6 +447,9 @@ class OrganizerPage(QWidget):
         add_card_heading(inspector.content_layout, "Move details")
         self.route = detail_label("Select a proposal to inspect its full route.")
         inspector.content_layout.addWidget(self.route)
+        rename = FeedbackButton('Edit destination filename…')
+        rename.clicked.connect(self._edit_filename)
+        inspector.content_layout.addWidget(rename)
         inspector.content_layout.addStretch()
         self._splitter.addWidget(inspector)
         self._splitter.setStretchFactor(0, 3)
@@ -451,12 +467,15 @@ class OrganizerPage(QWidget):
         footer.addStretch()
         footer.addWidget(self.apply_button)
         card.content_layout.addLayout(footer)
+        self.model.modelReset.connect(self._filter_proposals)
         self.table.selectionModel().currentRowChanged.connect(self._inspect_route)
         self.model.modelReset.connect(self._inspect_route)
         layout.addWidget(card)
         self._excluded_count = 0
         self.generation = 0
         self.workers = set()
+        self._rules = []
+        self._filenames = {}
         self._folder_names = {}
         self._excluded_types = set()
         self._settings = QSettings("FileMind", "FolderProfiles")
@@ -474,6 +493,32 @@ class OrganizerPage(QWidget):
         else:
             self.route.setText("Select a proposal to inspect its full route.")
 
+    def _filter_proposals(self):
+        for i, row in enumerate(self.model.rows):
+            self.table.setRowHidden(i, self.blocked.isChecked() and not row.has_conflict)
+
+    def _edit_rules(self):
+        rules = edit_rules(self, self._rules)
+        if rules is not None:
+            self._rules = rules
+            self._save_profile()
+            self._build_plan()
+
+    def _edit_filename(self):
+        index = self.table.currentIndex()
+        if not index.isValid() or self.table.isRowHidden(index.row()):
+            return
+        row = self.model.rows[index.row()]
+        name, ok = QInputDialog.getText(self, "Edit destination", "Filename:", text=row.destination.name)
+        if ok:
+            try:
+                validate_folder(name)
+            except ValueError as error:
+                QMessageBox.warning(self, "Invalid filename", str(error))
+                return
+            self._filenames[row.current_path] = name
+            self._build_plan()
+
     def _customize_folder(self):
         categories = sorted({item.classification.category for item in self._files})
         category, accepted = QInputDialog.getItem(
@@ -482,7 +527,7 @@ class OrganizerPage(QWidget):
         if not accepted:
             return
         folder, accepted = QInputDialog.getText(
-            self, "Category folder", "Folder name inside Organized:",
+            self, "Category folder", "Folder path inside Organized (use / and optional <year>):",
             text=self._folder_names.get(category, category),
         )
         if not accepted:
@@ -490,8 +535,7 @@ class OrganizerPage(QWidget):
         updated = dict(self._folder_names)
         updated[category] = folder
         try:
-            from filemind.organizer.planner import validate_folder
-            validate_folder(folder)
+            validate_destination(folder)
         except ValueError as error:
             QMessageBox.warning(self, "Invalid folder name", str(error))
             return
@@ -505,7 +549,7 @@ class OrganizerPage(QWidget):
 
     def _save_profile(self):
         self._settings.setValue(self._profile_key(), json.dumps({
-            "folders": self._folder_names, "excluded": sorted(self._excluded_types)
+            "rules": self._rules, "folders": self._folder_names, "excluded": sorted(self._excluded_types)
         }))
 
     def _edit_exclusions(self):
@@ -543,14 +587,17 @@ class OrganizerPage(QWidget):
     def set_scan_result(self, directory, files):
         if directory != self._directory:
             self.model.unchecked.clear()
+        self._filenames.clear()
+        self.rules_button.setEnabled(True)
         self._directory, self._files = directory, files
         self.model.directory = directory
         try:
             profile = json.loads(self._settings.value(self._profile_key(), "{}"))
+            self._rules = profile.get("rules", [])
             self._folder_names = dict(profile.get("folders", {}))
             self._excluded_types = set(profile.get("excluded", []))
         except (ValueError, TypeError, AttributeError):
-            self._folder_names, self._excluded_types = {}, set()
+            self._rules, self._folder_names, self._excluded_types = [], {}, set()
         self.exclude_button.setEnabled(bool(files))
         self._folder_button.setEnabled(bool(files))
         self._build_plan()
@@ -562,7 +609,8 @@ class OrganizerPage(QWidget):
         self._excluded_count = len(self._files) - len(included)
         self.model.replace(())
         self._summary.setText("Checking destinations…")
-        worker = PlanWorker(self.generation, self._directory, included, dict(self._folder_names), self)
+        worker = PlanWorker(self.generation, self._directory, included, dict(self._folder_names), self,
+                            tuple(self._rules), dict(self._filenames))
         self.workers.add(worker)
         worker.ready.connect(self._accept_plan)
         worker.finished.connect(self._worker_finished)
@@ -614,7 +662,7 @@ class DuplicateFinderPage(QWidget):
         self._view_stack = QStackedWidget()
         self._empty_state = EmptyState(
             "Scan a folder first",
-            "Duplicate detection is exact and read-only. FileMind will never remove duplicates.",
+            "Find files with identical SHA-256 hashes in the current inventory.",
             icon="⧉",
         )
         self._view_stack.addWidget(self._empty_state)
@@ -655,7 +703,7 @@ class DuplicateFinderPage(QWidget):
             self._summary.setText("Scan a folder before checking for duplicates.")
             self._empty_state.set_message(
                 "Scan a folder first",
-                "Duplicate detection is exact and read-only. FileMind will never remove duplicates.",
+                "Find files with identical SHA-256 hashes in the current inventory.",
             )
             self._view_stack.setCurrentWidget(self._empty_state)
         else:
@@ -758,7 +806,7 @@ class SettingsPage(QWidget):
         layout.setSpacing(12)
 
         card = SurfaceCard()
-        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.3.0")
+        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.4.0")
         note = QLabel("Scans and exact duplicate checks run on this device. Review moves in Organizer and restore them from History.")
         note.setWordWrap(True)
         card.content_layout.addWidget(note)

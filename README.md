@@ -19,20 +19,63 @@ latest attempt, its timing, and any paths that could not be read. It also keeps
 the last completed inventory and its category breakdown visible if a later
 scan fails or is cancelled. The **Files by category** chart shows counts for every category.
 Expand folders in **File tree** to browse the paths from that inventory.
-Select a category to filter **My Files**, or select
+Click a donut segment, bar, treemap tile or legend row (or press Enter on a legend row) to filter **My Files**, or select
 a file to inspect its exact size, timestamps, classification, and local preview.
 Use **Inspector** to collapse the details pane, or **Rescan** to refresh the
 inventory. **About** includes a **Reduce motion** preference.
 
 Open **Organizer** to review each proposed destination. After confirming a move,
 FileMind opens **History & undo** and selects the completed moves from that batch.
-Use **Undo selected moves** above the table and confirm to restore those files.
+Use **Undo selected operations** below the table and confirm to restore those files.
 You can reopen History later and select individual moved rows.
 
 Organizer remembers custom category destinations and excluded extensions separately
 for each scanned folder. Exclusions affect move proposals. Excluded types still
 appear in My Files and Duplicate Finder. Select eligible files or clear the selection
 in one click, then review the selected and blocked counts before applying moves.
+
+### Rules and conflict review
+
+In **Organizer → Rules**, add a named row and move it up or down to set its priority.
+The first row whose conditions all match wins. Empty fields match everything.
+Extension, filename glob and source-folder glob are case-insensitive. The source folder
+is relative to the scan root (`.` for the root). Minimum age counts whole days since
+modification, and minimum size is in bytes. A destination such as
+`Documents/Invoices/<year>` uses the file’s local modification year.
+The details pane shows the matching rule and conditions. **Blocked only** filters
+the preview. Select a row and use **Edit destination filename** to resolve a collision.
+Editing rebuilds the full preview. Confirmation details list the exact selected routes.
+
+### My Files → Tools
+
+- **Snapshots and folder comparison** saves a dated snapshot of the current scan on demand.
+  Compare a saved snapshot with a later scan of the same folder to see added, removed
+  and changed paths and byte deltas. Unknown sizes and inaccessible subtrees are marked.
+  For two folders, the current scan is on the left. Choose the right folder, then
+  optionally verify apparent size/time matches with cancellable SHA-256 reads.
+- **Search file contents** stores text only when you choose **Build / refresh local index**.
+  Rescan and refresh to index changed files and remove confirmed stale paths. Enter
+  words, select an optional file type and activate a snippet to open the inspector.
+  Indexing needs SQLite FTS5. The local `inventory.sqlite3` stores snapshots and
+  searchable extracted text in the app data directory. Closing FileMind preserves it.
+- **Cleanup** lists files in large subfolders (at least 100 MiB), files in the system
+  Downloads folder last modified over 90 days ago, and exact duplicates. Every file
+  starts unchecked. Highlight a duplicate and choose **Keep highlighted copy** to
+  change its keeper. FileMind rechecks both copies before sending the selected file
+  to system Trash. Estimated bytes count hard-linked storage once and only when all
+  its links are selected. Recovery from Trash uses the operating system.
+- **Verified copy** and **Verified move** transfer the selected regular file to an
+  existing destination folder, including on another drive. The destination name must
+  be free. FileMind verifies the temporary and published copies before removing a
+  move source. **History & undo** can reverse a copy while its original still verifies,
+  or restore a move by verifying the return copy first. Reconnect an unavailable
+  drive and reopen FileMind to retry recovery. A move interrupted with both copies
+  intact is reported as **copied**. A partial temporary file can remain for inspection.
+
+Verified transfers require stable filesystem identities and support ordinary file contents.
+Extended attributes and Windows named streams block transfer. Destination permissions
+follow the target filesystem. A copy creates an independent file, including when the
+source has hard links.
 
 ## Current status
 
@@ -117,9 +160,7 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
 
-Open **Organizer** to review **Proposed Organization**. Each file is proposed
-for an Organized folder inside the scanned root, then a category folder, retaining
-its filename (for example, Organized/Documents/report.pdf).
+Open **Organizer** to review **Proposed Organization**. Without a matching saved rule, each file goes to its category folder under `Organized` with its original filename.
 Files already at their destination are omitted. Existing destinations and multiple
 files targeting the same destination are flagged. Unknown extensions go to **Other**.
 A completed scan replaces the plan, including an empty scan; cancelled or failed
@@ -128,14 +169,14 @@ Previewing a plan leaves files untouched. To try moving files:
 
 1. Scan a personal folder containing a few test files. Open **Organizer**,
    review destinations and uncheck anything you want to keep in place.
-2. Click **Apply selected moves** and confirm the count. FileMind creates the
+2. Click **Review moves** and confirm the count. FileMind creates the
    required folders under `Organized` and checks each file again before moving it.
 3. In **History**, inspect both paths, the status and any skip reason.
-   Select moved rows, click **Undo selected moves** and confirm. You can also
+   Select moved rows, click **Undo selected operations** and confirm. You can also
    do this after restarting FileMind. Undo removes empty destination folders
    that FileMind recorded creating.
 
-Moves support regular user-owned files within the user profile on the same
+Organizer moves support regular user-owned files within the user profile on the same
 filesystem. Hidden paths, links and system files are excluded. Existing files
 are never overwritten. Undo verifies the recorded identity, size, timestamp and
 SHA-256 digest. If either path conflicts, Activity History explains the reason.
@@ -173,7 +214,7 @@ chmod +x FileMind-linux-x86_64
 The Linux release is built on Ubuntu 22.04 for x86_64 and requires glibc 2.35 or
 later plus the system libraries required by Qt. To create a GitHub Release with
 both platform builds, push a version tag such as `v0.1.0`. Published downloads
-will appear on the [Releases page](https://github.com/zpheex-dev/FileMind-vibecoded/releases).
+will appear on the [Releases page](https://github.com/zpheex-dev/FileMind/releases).
 
 ## Run tests
 

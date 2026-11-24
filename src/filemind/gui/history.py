@@ -49,7 +49,7 @@ class HistoryModel(QAbstractTableModel):
             row = self.rows[index.row()]
             if row["reason"] or row["status"] in {"skipped", "ambiguous"}:
                 return QColor(AMBER)
-            if row["status"] in {"moved", "undone"}:
+            if row["status"] in {"moved", "copied", "undone"}:
                 return QColor(SUCCESS)
         if index.isValid() and role in (Qt.DisplayRole, Qt.ToolTipRole):
             return self.rows[index.row()][self.columns[index.column()][0]]
@@ -90,8 +90,8 @@ class ActivityHistoryPage(QWidget):
         self.details = detail_label("Select an operation to inspect the paths and outcome.")
         panel.content_layout.addWidget(self.details)
         footer = QHBoxLayout()
-        footer.addWidget(QLabel("Undo restores files to their recorded paths"), 1)
-        self.button = FeedbackButton("Undo selected moves")
+        footer.addWidget(QLabel("Select completed copies or moves to undo"), 1)
+        self.button = FeedbackButton("Undo selected operations")
         self.button.setEnabled(False)
         self.table.selectionModel().selectionChanged.connect(self._update_button)
         self.table.selectionModel().currentRowChanged.connect(self._show_details)
@@ -113,12 +113,12 @@ class ActivityHistoryPage(QWidget):
 
     def selected_ids(self):
         rows = (self.model.rows[i.row()] for i in self.table.selectionModel().selectedRows())
-        return [r["id"] for r in rows if r["status"] == "moved"]
+        return [r["id"] for r in rows if r["status"] in ("moved", "copied")]
 
     def _update_button(self):
         count = len(self.selected_ids())
         self.button.setEnabled(bool(count))
-        self.button.setText(f"Undo {count:,} moves" if count else "Undo selected moves")
+        self.button.setText(f"Undo {count:,} operations" if count else "Undo selected operations")
 
     def show_rows(self, rows, batch=None, undo_ids=()):
         self.model.replace(rows)
@@ -135,7 +135,7 @@ class ActivityHistoryPage(QWidget):
             cell = self.model.index(index, 0)
             if not focus.isValid():
                 focus = cell
-            if row["status"] == "moved":
+            if row["status"] in ("moved", "copied"):
                 selection.select(cell, cell)
         selected = self.table.selectionModel()
         selected.select(selection, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
@@ -146,7 +146,7 @@ class ActivityHistoryPage(QWidget):
         self._update_button()
         if batch_rows:
             counts = Counter(
-                "blocked" if undo_ids and row["status"] == "moved" else row["status"]
+                "blocked" if undo_ids and row["status"] in ("moved", "copied") else row["status"]
                 for row in batch_rows
             )
             outcome = "  ·  ".join(f"{count:,} {status}" for status, count in sorted(counts.items()))

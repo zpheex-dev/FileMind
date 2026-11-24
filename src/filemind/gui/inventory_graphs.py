@@ -1,7 +1,7 @@
 """Interactive views of a completed inventory's category totals."""
 
-from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QBoxLayout, QButtonGroup, QHeaderView, QHBoxLayout, QLabel,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -20,16 +20,28 @@ COLORS = (
 
 
 class CategoryChart(QWidget):
+    category_requested = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.setMinimumSize(208, 196)
         self.setMaximumSize(405, 196)
         self.entries = []
+        self.regions = []
         self.mode = "Donut"
         self.total_label = ""
         self.setAccessibleName("Category chart")
 
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            for name, region in self.regions:
+                if region.contains(event.position()):
+                    self.category_requested.emit(name)
+                    return
+        super().mouseReleaseEvent(event)
+
     def paintEvent(self, event):
+        self.regions.clear()
         if not self.entries:
             return
         painter = QPainter(self)
@@ -49,7 +61,10 @@ class CategoryChart(QWidget):
         ring.moveCenter(bounds.center())
         angle = 90 * 16
         accumulated = 0
-        for _, value, color in self.entries:
+        stroke = QPainterPathStroker()
+        stroke.setWidth(27)
+        stroke.setCapStyle(Qt.FlatCap)
+        for name, value, color in self.entries:
             accumulated += value
             end = 90 * 16 - round(accumulated / total * 360 * 16)
             pen = QPen(QColor(color), 27)
@@ -58,6 +73,10 @@ class CategoryChart(QWidget):
             span = angle - end
             gap = min(9, span // 3) if len(self.entries) > 1 else 0
             painter.drawArc(ring, angle - gap, gap - span)
+            arc = QPainterPath()
+            arc.arcMoveTo(ring, (angle-gap)/16)
+            arc.arcTo(ring, (angle-gap)/16, (gap-span)/16)
+            self.regions.append((name, stroke.createStroke(arc)))
             angle = end
         font = painter.font()
         font.setPointSize(17)
@@ -72,11 +91,12 @@ class CategoryChart(QWidget):
         height = min(16.0, step * 0.60)
         largest = self.entries[0][1]
         painter.setPen(Qt.PenStyle.NoPen)
-        for index, (_, value, color) in enumerate(self.entries):
+        for index, (name, value, color) in enumerate(self.entries):
             track = QRectF(bounds.left(), top + (index + 0.5) * step - height / 2,
                            bounds.width(), height)
             painter.setBrush(QColor(TRACK))
             painter.drawRoundedRect(track, height / 2, height / 2)
+            self.regions.append((name, QRectF(track)))
             track.setWidth(max(2.0, track.width() * value / largest))
             painter.setBrush(QColor(color))
             painter.drawRoundedRect(track, height / 2, height / 2)
@@ -90,6 +110,7 @@ class CategoryChart(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(color))
             painter.drawRoundedRect(tile, 4, 4)
+            self.regions.append((name, tile))
             if tile.height() >= 24 and tile.width() >= 44:
                 painter.setPen(QColor("#081711" if QColor(color).lightness() > 110 else TEXT))
                 label = painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight,
@@ -138,7 +159,9 @@ class InventoryGraphs(SurfaceCard):
         self.legend.setHeaderHidden(True)
         self.legend.setRootIsDecorated(False)
         self.legend.setUniformRowHeights(True)
-        self.legend.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.legend.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.legend.itemClicked.connect(lambda item, _: self.canvas.category_requested.emit(item.text(0)))
+        self.legend.itemActivated.connect(lambda item, _: self.canvas.category_requested.emit(item.text(0)))
         self.legend.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.legend.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.legend.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)

@@ -1,5 +1,6 @@
 """Background tasks used by the desktop interface."""
 
+from dataclasses import replace
 import logging
 from pathlib import Path
 from threading import Event
@@ -126,6 +127,8 @@ class DuplicateScanWorker(QThread):
                 progress_callback=self.progress.emit,
                 cancellation_event=self._cancellation_event,
             )
+            if self._cancellation_event.is_set():
+                result = replace(result, groups=(), cancelled=True)
             self.completed.emit(result)
         except Exception as error:
             LOGGER.exception("Duplicate check failed")

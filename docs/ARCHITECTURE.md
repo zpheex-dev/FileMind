@@ -1,127 +1,102 @@
 # FileMind architecture
 
-## Design principles
+## Inventory and inspection
 
-- Keep filesystem scanning, analysis, classification, persistence, and user
-  interface responsibilities separate.
-- Prefer local processing; do not upload users' files.
-- Scanning and analysis must be read-only.
-- A future organization operation must be previewed and explicitly confirmed,
-  must not overwrite an existing destination, and must be recorded so it can be
-  undone safely.
-- Keep classification behind a replaceable interface so transparent rules can
-  later coexist with a trained model.
+`scanner.scan_directory` enumerates regular files with `os.scandir`. An enumeration
+error at the root fails the attempt. An error below the root records a path and
+continues. The scanner skips symlinks and checks the Windows mount-point reparse tag
+to skip junctions on Python 3.11 and later.
 
-## Current package layout
+`DirectoryScanWorker` collects metadata and classifies each discovered file.
+Only its completed signal replaces the inventory, graph totals, duplicate candidates
+and Organizer plan. A readable empty root produces a completed empty inventory.
+Overview keeps the report for the latest attempt alongside the last completed
+inventory. Chart shapes and the keyboard-accessible legend use the same category
+navigation signal as the category table.
 
-| Package or file | Responsibility | Current state |
-| --- | --- | --- |
-| `src/filemind/main.py` | `filemind-scan` command-line prototype | Lists files from a user-selected directory |
-| `src/filemind/scanner/` | Discover files and collect filesystem paths | Recursively scans without following symlinks; reports progress, cancellation, and per-directory errors |
-| `src/filemind/analyzer/metadata.py` | Extract filesystem metadata and supported text | Reads timestamps/size, optionally extracting bounded TXT, Markdown, Python, CSV, JSON, LOG, and PDF content |
-| `src/filemind/categorizer/classifier.py` | Categorize files behind a replaceable interface | Extension-based rules return a category, heuristic score, method, and explanation |
-| `src/filemind/organizer/` | Generate read-only organization plans | Immutable proposals with disk and plan conflict checks; no execution |
-| `src/filemind/database/` | Persist scan and operation history | Placeholder |
-| `src/filemind/gui/app.py` | Start the PySide6 desktop application | Creates the application and applies the shared theme |
-| `src/filemind/gui/window.py` | Persistent navigation and page switching | Connects folder selection, progress, cancellation, and results |
-| `src/filemind/duplicate_detector/` | Identify exact duplicate content | Groups same-size candidates by local SHA-256 and reports file issues without modifying files |
-| `src/filemind/gui/pages.py` | Dashboard and feature page layouts | Displays recursive scan metadata, local text previews, and duplicate-check results |
-| `src/filemind/gui/components.py`, `theme.py` | Shared components and visual design system | Reusable cards, badges, empty states, and dark styling |
-| `src/filemind/gui/workers.py` | Run GUI-triggered work outside the main thread | Scans, analyzes, and hashes duplicate candidates in `QThread`s with progress and cancellation; selected-file preview extraction uses a separate worker |
+My Files uses a sortable Qt table model with a debounced filename/location filter.
+The preview worker loads the selected file on demand and checks cached identity,
+size, modification time and readability. The bounded extractor supports UTF-8 text
+(TXT, MD, PY, CSV, JSON, LOG) up to 2 MiB and PDFs up to 20 MiB or 50 pages.
+Extracted text is capped at 100,000 characters. Classification uses extension rules
+behind the `Classifier` protocol.
 
-The scanner returns a `ScanResult` containing discovered `pathlib.Path` objects,
-per-directory issues, and cancellation status. It never changes file contents.
-GUI scans request metadata only; the inspector caches at most eight on-demand text previews.
-On selection, PreviewWorker checks cached size and nanosecond modification time
-and verifies read access before reuse. Changed files are extracted again; errors
-are retried on the next selection. These checks run outside the GUI thread.
-The file inventory uses a QAbstractTableModel with a sorting/filtering proxy instead of per-cell widgets.
-The analyzer returns immutable `FileMetadata` records, including an explicit
-content status and any extraction error.
+## Organizer and History
 
-## Current scan and analysis flow
+The folder profile in QSettings holds exclusions, category folders and an ordered
+list of rules. The planner evaluates all populated conditions in a row and uses the
+first match. The category mapping is the fallback. Nested destination components
+and edited names must pass portable filename validation. The local modification year
+expands `<year>`. A missing year blocks that proposal. A PlanWorker builds the entire
+dry run after each edit, checking disk occupancy, parent directories, batch collisions
+and scanned signatures. Generation numbers discard obsolete worker results.
 
-1. The user selects a directory from the dashboard or shared header.
-2. A `QThread` recursively discovers regular files without following symlinks.
-3. The worker reports scan and analysis progress and can stop between directory entries or files.
-4. The analyzer records path, extension, size, and timestamps, then records an on-demand content status. Selected-file previews extract text in a separate worker.
-5. The rule-based classifier maps file extensions to broad categories and explains each decision.
-6. The dashboard displays file count, total size, and category count; My Files shows metadata, category, heuristic score, and selected text preview.
-7. Accessible results are retained while filesystem issues and per-file analysis errors are reported.
+Apply captures selected proposals and their metadata before confirmation. A journal
+worker passes those routes to `MoveJournal`. Same-volume Organizer moves stay within
+the user profile and use pinned directories and a no-replace rename. The journal
+records filesystem identities and a SHA-256 checksum in SQLite. Undo checks the
+recorded paths and content, restores the original filename and removes only empty,
+recorded destination directories with matching identities. Legacy move rows use
+the same execution and recovery path. A process lock serializes mutations and recovery.
 
-Scanning and analysis never change file contents. Text extraction is limited to
-2 MiB per supported text file and 20 MiB / 50 pages per PDF, with a 100,000
-character preview cap. These limits are deliberate safeguards against very large
-documents.
+## Snapshots, folder comparison and full-text search
 
-## Exact duplicate detection
+The tools under My Files operate on the completed scan. Each dialog runs disk I/O
+in a QThread. A snapshot persists the root, relative paths, file identity, size,
+nanosecond mtime and discovery gaps in the per-user `inventory.sqlite3`. Snapshot
+comparisons also detect identity replacement. Two-folder comparison uses relative
+paths, size and mtime across volumes. Missing metadata and unreadable subtrees are
+reported explicitly. Optional SHA-256 verification reopens both apparent matches,
+checks their scanned signatures and tests cancellation between chunks.
 
-The Duplicate Finder uses the metadata from the latest completed scan. It first
-groups files by size so singleton sizes do not need to be hashed, then reads
-candidate files in 1 MiB chunks and computes SHA-256 locally. It checks size and
-modification time before and after each hash; files that disappear, change, or
-cannot be read are reported as issues rather than reported as confirmed
-duplicates. A result groups only files with both the same size and same hash,
-and reports the potentially redundant bytes without taking any file action.
-Storage estimates use distinct (st_dev, st_ino) identities captured during hashing,
-while retaining all matching paths. Two hard links alone have zero redundant bytes.
-This is a logical byte estimate, not a guarantee about physical disk space reclaimed.
+The FTS5 index shares the inventory database. Each row of bounded text is associated
+with one root, relative path, extension and scanned signature. Explicit index refresh
+uses a transaction, reads changed files through a checked open descriptor, skips
+unchanged signatures and removes confirmed stale paths. A cancelled refresh rolls
+back. Previous entries beneath discovery gaps are retained. Search quotes literal
+terms, intersects them and returns ranked snippets for the chosen root and type.
+The inspector uses the selected path in the current inventory. Builds without FTS5
+can still scan, compare snapshots and organize files.
 
-Hashing runs in a cancellable `QThread`. A cancelled check discards partial
-groups and leaves the previous complete results visible. A new completed scan
-replaces the candidate list and clears old duplicate results. Duplicate
-detection never deletes or modifies files.
+## Duplicates and cleanup
 
-## Read-only organization planning
+Duplicate Finder hashes same-size candidates, checking identities and timestamps
+around the read. Cancellation during hashing, grouping or worker publication keeps
+the last completed result. Cleanup reuses duplicate detection and also computes
+subfolder sizes and old Downloads candidates. The user chooses paths and a keeper
+per duplicate group. Savings count an inode once if all its recorded links are
+selected. The estimate is logical file size after emptying Trash. It excludes
+filesystem compression, allocation overhead and blocks shared between distinct inodes.
 
-After DirectoryScanWorker finishes, MainWindow passes the root and existing
-ClassifiedFile records to OrganizerPage.set_scan_result. The page replaces its
-previous snapshot using organizer.planner.propose_organization; cancelled and
-failed scans do not call this method.
+Cleanup confirms the selected count, pins parent directories, checks the selected
+file against its inventory and rehashes the duplicate and keeper before invoking
+Qt's system Trash operation. Batch results report each success or refusal. A busy
+FileMind operation holds the same process lock. Trash recovery belongs to the OS.
 
-The planner has no PySide6 dependency. It reuses each classification's category
-and explanation, proposes root/Organized/category/source.name, and skips paths already at
-that destination. It counts destination keys across proposals, then checks disk
-occupancy (including dangling symlinks) and blocked Organized or category folders. A proposal
-contains current_path, destination, reason, and a tuple of conflict messages.
-Both conflict types can coexist. Path comparisons follow the host's case rules.
-Unknown extensions use the classifier's Other category.
+## Verified transfers
 
-No directories are created and no files are changed. Conflicts describe the
-filesystem at planning time; rescan to refresh. Any future execution milestone
-must revalidate and obtain confirmation. Moves, SQLite history, undo, and ML
-remain unimplemented.
+Explicit copy and move use a companion `transfers` table keyed by the existing
+`moves` journal ID. Both selected parent directories are pinned. Their persisted
+identities prevent an unavailable or replacement mount from being treated as the
+recorded drive. FileMind writes a unique temporary file on the target volume,
+flushes it, checks its SHA-256 against the recorded source, and commits its signature
+before publishing with a no-replace rename. Linux syncs the containing directory.
+Windows requests write-through publication.
 
-## Planned data flow
+A move isolates the recorded source under a journaled holding name, rechecks the
+held file and published copy, then unlinks the held file. Undo of a move follows
+the same verified-copy procedure back to an unoccupied original path. Undo of a
+copy requires the original to pass verification before removing the destination.
+Regular files with extended attributes or named streams are outside this transfer
+format. The copy is independent of other hard links and inherits destination ACLs.
 
-1. A GUI worker recursively scans a user-selected directory without blocking the interface.
-2. The analyzer extracts file metadata and supported document text.
-3. A classifier returns a category, confidence, and an explanation.
-4. The implemented duplicate detector groups same-size files with matching SHA-256 hashes.
-5. The recommendation engine creates a reviewable organization plan.
-6. Only after explicit user approval does the organizer move selected files.
-7. SQLite stores completed operations and original paths for safe undo.
+On startup the journal checks interrupted stages. When a verified holding entry can
+be returned to its unoccupied name, recovery restores it. With both valid paths,
+the operation is recorded as a copy and can be undone. With only a verified move
+destination it is recorded as moved. Recovery leaves ambiguous or unavailable
+locations pending. An incomplete destination temporary file may remain, with its
+name reported in History. Reopening FileMind retries pending records. These checks
+assume a filesystem that honors flush requests. Concurrent edits by other programs
+can block an operation.
 
-The GUI will call these modules through focused interfaces rather than owning
-business logic itself. File movement remains unavailable. Expensive scanning,
-hashing, and extraction will run outside the GUI thread.
-
-`Classifier` is a protocol; `RuleBasedClassifier` is the current implementation.
-Its confidence-like score is a heuristic rule strength, not a calibrated
-probability. A future local model can implement the same interface without
-changing the GUI or scan worker.
-
-## Milestones
-
-1. Establish package metadata, basic tests, and architecture documentation.
-2. Build the shared PySide6 shell and consistent navigation.
-3. Connect dashboard and file explorer views to real data.
-4. Add recursive scanning and metadata/content analysis with background work.
-5. Add an explainable rule-based classifier and a model-ready interface.
-6. Add and integrate SHA-256 exact duplicate detection.
-7. Generate explainable organization recommendations and previews (implemented, read-only).
-8. Add confirmation-gated moves, conflict checks, SQLite history, and undo.
-9. Expand tests, optimize large scans, and finish user documentation.
-
-Each milestone should be validated before the next begins. File movement remains
-out of scope until the user can review and explicitly confirm a plan.
+Published platform builds are available from [FileMind Releases](https://github.com/zpheex-dev/FileMind/releases).

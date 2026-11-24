@@ -2,6 +2,7 @@
 
 import os
 import stat as stat_module
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +104,7 @@ def _extract_text(
     path: Path,
     extension: str,
     size_bytes: int,
+    stream=None,
 ) -> tuple[str | None, ContentStatus, bool, str | None]:
     if extension in TEXT_EXTENSIONS:
         if size_bytes > MAX_TEXT_BYTES:
@@ -113,7 +115,7 @@ def _extract_text(
                 f"Text extraction is limited to {MAX_TEXT_BYTES} bytes per file.",
             )
         try:
-            with path.open("rb") as file:
+            with (path.open("rb") if stream is None else nullcontext(stream)) as file:
                 data = file.read(MAX_TEXT_BYTES + 1)
         except OSError as error:
             return None, "error", False, f"Could not read text content: {error}"
@@ -145,7 +147,14 @@ def _extract_text(
         )
 
     try:
-        with pymupdf.open(path) as document:
+        if stream is None:
+            document = pymupdf.open(path)
+        else:
+            data = stream.read(MAX_PDF_BYTES + 1)
+            if len(data) > MAX_PDF_BYTES:
+                return None, "skipped", False, "PDF exceeded the extraction limit."
+            document = pymupdf.open(stream=data, filetype="pdf")
+        with document:
             if document.needs_pass:
                 return None, "error", False, "Password-protected PDFs are not read."
 

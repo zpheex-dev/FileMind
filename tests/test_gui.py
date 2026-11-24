@@ -501,6 +501,16 @@ def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_p
         assert "0/1 sizes" in dashboard.inventory_details.text()
 
         failed = tmp_path / "unavailable"
+        failed.mkdir()
+        import os
+        original = os.scandir
+
+        def deny_root(path):
+            if path == failed:
+                raise PermissionError("denied at enumeration")
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", deny_root)
         window._start_scan(failed)
         _wait_for_worker(application, window._scan_worker)
         assert dashboard.scan_status.text() == "Failed"
@@ -513,6 +523,11 @@ def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_p
         window._rescan_button.click()
         _wait_for_worker(application, window._scan_worker)
         assert window._latest_scan.root == root
+        empty = tmp_path / 'empty'
+        empty.mkdir()
+        window._start_scan(empty)
+        _wait_for_worker(application, window._scan_worker)
+        assert window._inventory_root == empty and not window._scan_files
     finally:
         window.close()
 
@@ -659,3 +674,136 @@ def test_category_navigation_and_per_folder_preferences(application, tmp_path, m
     wait_plan(application, page)
     assert not page._excluded_types
     reopened.close()
+
+
+def test_chart_and_keyboard_legend_choose_category(application):
+    from PySide6.QtCore import QPointF
+    from filemind.gui.inventory_graphs import InventoryGraphs
+    graphs = InventoryGraphs()
+    graphs.set_totals({"Documents": (2, 100), "Code": (1, 10)})
+    graphs.show()
+    spy = QSignalSpy(graphs.canvas.category_requested)
+    for button in graphs._mode.buttons():
+        button.click()
+        application.processEvents()
+        canvas = graphs.canvas
+        canvas.grab()
+        name, region = canvas.regions[0]
+        point = next(QPointF(x, y) for x in range(0, canvas.width(), 2)
+                     for y in range(0, canvas.height(), 2) if region.contains(QPointF(x, y)))
+        QTest.mouseClick(canvas, Qt.LeftButton, pos=point.toPoint())
+        assert spy.at(spy.count() - 1) == [name]
+    graphs.legend.setCurrentItem(graphs.legend.topLevelItem(1))
+    QTest.keyClick(graphs.legend, Qt.Key_Return)
+    assert spy.at(spy.count() - 1) == ["Code"]
+    graphs.close()
+
+
+def test_rename_resolves_blocked_rows_and_persists_priority(application, tmp_path, monkeypatch):
+    from filemind.gui.pages import OrganizerPage
+    from PySide6.QtWidgets import QInputDialog
+    from test_moves import classified, user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    page = OrganizerPage()
+    page._settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    paths = [tmp_path / part / "a.txt" for part in ("first", "second")]
+    for path in paths:
+        path.parent.mkdir()
+        user_file(path, "item")
+    files = list(map(classified, paths))
+    page.set_scan_result(tmp_path, files)
+    rules = [{"name": "First", "destination": "Nested/Folder"}, {"name": "Second", "destination": "Other"}]
+    monkeypatch.setattr("filemind.gui.pages.edit_rules", lambda *_: rules)
+    page.rules_button.click()
+    wait_plan(application, page)
+    page.blocked.setChecked(True)
+    assert all(r.has_conflict for r in page.model.rows)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("renamed.txt", True))
+    page._edit_filename()
+    wait_plan(application, page)
+    assert len(page.selected_proposals()) == 2
+    assert all(page.table.isRowHidden(i) for i in range(2))
+    assert any(r.destination.name == "renamed.txt" for r in page.selected_proposals())
+    page.set_scan_result(tmp_path, files)
+    wait_plan(application, page)
+    assert page._rules == rules and all("First" in r.reason for r in page.model.rows)
+
+
+def test_snapshot_and_search_dialogs_use_completed_inventory(application, tmp_path):
+    from filemind.database.inventory import scan_inventory
+    from filemind.gui.inventory_tools import ComparisonDialog, SearchDialog
+    root = tmp_path / "docs"
+    root.mkdir()
+    file = root / "letter.txt"
+    file.write_text("searchable phrase")
+    view = scan_inventory(root, Event())
+    db = tmp_path / "inventory.sqlite3"
+    dialog = ComparisonDialog(None, view, db)
+    _wait_for_worker(application, dialog.task)
+    dialog.load_snapshots(True)
+    _wait_for_worker(application, dialog.task)
+    assert dialog.baseline.count() == 1
+    dialog.diff()
+    _wait_for_worker(application, dialog.task)
+    assert dialog.status.text() == "0 results"
+    dialog.close()
+
+    search = SearchDialog(None, view, db)
+    search.refresh()
+    _wait_for_worker(application, search.task)
+    search.terms.setText("phrase")
+    search.query()
+    _wait_for_worker(application, search.task)
+    result = search.table.topLevelItem(0)
+    assert result.text(0) == "letter.txt" and "[phrase]" in result.text(1)
+    search.table.setCurrentItem(result)
+    search.inspect()
+    assert search.path == file
+
+
+def test_duplicate_worker_checks_cancellation_before_publication(application, monkeypatch):
+    from filemind.duplicate_detector.detector import DuplicateResult
+    from filemind.gui.workers import DuplicateScanWorker
+    worker = DuplicateScanWorker([])
+    def cancel_after_grouping(*args, **kwargs):
+        worker.cancel()
+        return DuplicateResult(("unpublished",), (), 2, False)
+    monkeypatch.setattr("filemind.gui.workers.find_duplicates", cancel_after_grouping)
+    results = QSignalSpy(worker.completed)
+    worker.run()
+    result, = results.at(0)
+    assert result.cancelled and not result.groups
+
+
+def test_denied_root_keeps_graph_duplicates_and_organizer(application, tmp_path, monkeypatch):
+    from test_moves import user_file
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / "files"
+    root.mkdir()
+    for name in ("a.txt", "b.txt"):
+        user_file(root / name, "same")
+    window = MainWindow(tmp_path / "moves.db")
+    window._start_scan(root)
+    _wait_for_worker(application, window._scan_worker)
+    page = window._pages["AI Organizer"]
+    wait_plan(application, page)
+    window._start_duplicate_check()
+    _wait_for_worker(application, window._duplicate_worker)
+    duplicates = window._pages["Duplicate Finder"]._tree
+    graph = window._pages["Dashboard"].graphs.canvas
+    assert duplicates.topLevelItemCount() == 1 and graph.entries and len(page.model.rows) == 2
+    inventory, entries, plan = window._scan_files, list(graph.entries), page.model.rows
+    scandir = os.scandir
+
+    def denied(path):
+        if path == root:
+            raise PermissionError("enumeration denied")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    window._start_scan(root)
+    _wait_for_worker(application, window._scan_worker)
+    assert window._latest_scan.status == "Failed"
+    assert window._scan_files is inventory and graph.entries == entries
+    assert duplicates.topLevelItemCount() == 1 and page.model.rows is plan
+    window.close()

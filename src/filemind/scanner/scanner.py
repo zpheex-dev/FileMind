@@ -1,6 +1,7 @@
 """Read-only recursive directory scanning."""
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -69,7 +70,8 @@ def scan_directory(
                     try:
                         # Windows junctions can create recursive directory cycles.
                         if entry.is_symlink() or (
-                            hasattr(entry_path, "is_junction") and entry_path.is_junction()
+                            os.name == "nt" and entry.stat(follow_symlinks=False).st_reparse_tag
+                            == stat.IO_REPARSE_TAG_MOUNT_POINT
                         ):
                             continue
                         if entry.is_dir(follow_symlinks=False):
@@ -86,6 +88,8 @@ def scan_directory(
                     except OSError as error:
                         issues.append(ScanIssue(entry_path, str(error)))
         except OSError as error:
+            if current_directory == directory:
+                raise
             issues.append(ScanIssue(current_directory, str(error)))
 
         if progress_callback is not None:

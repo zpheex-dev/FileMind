@@ -1,5 +1,7 @@
 """Personal-file validation and same-volume, no-replace renames."""
 
+from filemind.organizer.rules import validate_folder
+
 import ctypes
 import hashlib
 import os
@@ -94,6 +96,34 @@ def parent_handle(path, home, create_from=None, on_create=None):
             yield fd
 
 
+@contextmanager
+def pinned_directory(path):
+    """Pin an explicitly selected directory, including directories on removable drives."""
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Choose an absolute directory")
+    with ExitStack() as stack:
+        if os.name == "nt":
+            import win32file
+            for directory in (*reversed(path.parents), path):
+                handle = win32file.CreateFile(
+                    str(directory), 0, win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE, None,
+                    win32file.OPEN_EXISTING, win32file.FILE_FLAG_BACKUP_SEMANTICS |
+                    win32file.FILE_FLAG_OPEN_REPARSE_POINT, None)
+                stack.callback(handle.Close)
+                info = directory.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError("Transfer and cleanup directories must not be links")
+            yield path
+        else:
+            flags = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_RDONLY
+            fd = os.open(path.anchor, flags)
+            stack.callback(os.close, fd)
+            for part in path.parts[1:]:
+                fd = os.open(part, flags, dir_fd=fd)
+                stack.callback(os.close, fd)
+            yield fd
+
+
 def _entry(parent, name):
     if os.name == "nt":
         return (parent / name).lstat()
@@ -184,8 +214,13 @@ def move(root, home, original, organized, expected, checksum, undo=False, on_cre
         personal_parts(path, home)
         if not path.is_relative_to(root):
             raise PermissionError("Path outside scanned folder")
-    if organized.parent.parent != root / "Organized" or organized.name != original.name:
+    folders = organized.parent.relative_to(root / "Organized").parts
+    if not folders:
         raise ValueError("Invalid proposed destination")
+    for part in folders:
+        validate_folder(part)
+    if organized.name != original.name:
+        validate_folder(organized.name)
     source, dest = (organized, original) if undo else (original, organized)
     with parent_handle(source.parent, home) as src:
         value, change_time = digest(src, source.name, expected)

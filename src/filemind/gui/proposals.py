@@ -8,9 +8,9 @@ from filemind.organizer.planner import propose_organization
 class PlanWorker(QThread):
     ready = Signal(int, object, str)
 
-    def __init__(self, generation, directory, files, folders, parent):
+    def __init__(self, generation, directory, files, folders, parent, rules=(), filenames=None):
         super().__init__(parent)
-        self.args = directory, files, folders
+        self.args = directory, files, folders, rules, filenames
         self.generation = generation
 
     def run(self):

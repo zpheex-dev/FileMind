@@ -88,3 +88,15 @@ def test_scan_directory_raises_for_file_path(tmp_path: Path) -> None:
 
     with pytest.raises(NotADirectoryError):
         scan_directory(file_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory junction")
+def test_junction_outside_root_is_skipped(tmp_path):
+    import subprocess
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "private.txt").touch()
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "link"), str(outside)], check=True)
+    result = scan_directory(root)
+    assert not result.files and result.directories_scanned == 1
