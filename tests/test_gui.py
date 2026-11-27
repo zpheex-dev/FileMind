@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from threading import Event
@@ -9,7 +10,7 @@ import pytest
 from shiboken6 import isValid
 from PySide6.QtCore import QAbstractAnimation, QEventLoop, QSettings, QThread, QTimer, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QPlainTextEdit, QPushButton
 
 from filemind.analyzer.metadata import analyze_file
 from filemind.categorizer.classifier import ClassifiedFile, RuleBasedClassifier
@@ -225,11 +226,15 @@ def test_duplicate_finder_uses_scan_results_without_changing_files(
     assert isinstance(duplicate_page, DuplicateFinderPage)
     assert duplicate_page._find_button.isEnabled()
     duplicate_page._find_button.click()
+    assert not duplicate_page.check_progress.isHidden()
+    assert duplicate_page.check_progress.maximum() == 0
     duplicate_worker = window._duplicate_worker
     assert duplicate_worker is not None
     _wait_for_worker(application, duplicate_worker)
 
     assert window._duplicate_worker is None
+    assert duplicate_page.check_progress.isHidden()
+    assert duplicate_page.check_progress.value() == 1000
     assert duplicate_page._tree.topLevelItemCount() == 1
     group = duplicate_page._tree.topLevelItem(0)
     assert group.childCount() == 2
@@ -323,7 +328,9 @@ def test_preview_refreshes_after_external_change(application, tmp_path, monkeypa
 
     try:
         page.set_scan_result(tmp_path, files)
+        assert not page.preview_progress.isHidden()
         drain()
+        assert page.preview_progress.isHidden()
         assert "old content" in page._preview.toPlainText()
         old_stat = original.stat()
         if change == "size":
@@ -499,6 +506,11 @@ def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_p
         assert dashboard.warnings.topLevelItem(0).text(1) == str(unreadable_folder)
         assert dashboard.warnings.topLevelItem(1).text(0) == "Metadata"
         assert "0/1 sizes" in dashboard.inventory_details.text()
+        log = json.loads(window._latest_scan.log_path.read_text(encoding="utf-8"))
+        assert log["status"] == "Completed with warnings"
+        assert log["warnings"][0] == {
+            "stage": "discovery", "path": str(unreadable_folder), "reason": "Permission denied",
+        }
 
         failed = tmp_path / "unavailable"
         failed.mkdir()
@@ -514,6 +526,15 @@ def test_scan_warning_report_and_failed_rescan_keep_inventory(application, tmp_p
         window._start_scan(failed)
         _wait_for_worker(application, window._scan_worker)
         assert dashboard.scan_status.text() == "Failed"
+        log = json.loads(window._latest_scan.log_path.read_text(encoding="utf-8"))
+        assert log["status"] == "Failed" and log["scan_root"] == str(failed) and log["error"]
+        dashboard.open_scan_log.click()
+        dialog = dashboard.findChild(QDialog)
+        assert dialog is not None and dialog.isVisible()
+        preview = dialog.findChild(QPlainTextEdit)
+        assert preview.isReadOnly()
+        assert json.loads(preview.toPlainText()) == log
+        dialog.close()
         assert dashboard.run_error.text()
         assert str(failed) in dashboard.run_details.text()
         assert str(root) in dashboard.inventory_details.text()
@@ -570,12 +591,16 @@ def test_old_plan_completion_cannot_replace_new_scan(application, tmp_path):
     page.set_scan_result(tmp_path, [])
     old_generation = page.generation
     page.set_scan_result(tmp_path, [])
-    wait_plan(application, page)
+    assert not page.plan_progress.isHidden()
     page._accept_plan(old_generation, ("obsolete",), "")
+    assert not page.plan_progress.isHidden()
+    wait_plan(application, page)
+    assert page.plan_progress.isHidden()
     assert page.model.rowCount() == 0
 
 
-def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypatch):
+@pytest.mark.parametrize("use_personal", [False, True])
+def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypatch, use_personal):
     from PySide6.QtWidgets import QMessageBox
     from test_moves import user_file
 
@@ -584,14 +609,28 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     folder = tmp_path / "Downloads"
     folder.mkdir()
-    for name in ("a.txt", "b.txt"):
+    for name in ("a.pdf", "b.pdf"):
         user_file(folder / name, name)
+    documents = tmp_path / "Documents"
+    documents.mkdir()
+    monkeypatch.setattr("filemind.gui.window.standard_personal_folders", lambda: {"Documents": documents})
     history_path = tmp_path / "history.db"
     window = MainWindow(history_path)
     window._start_scan(folder)
     _wait_for_worker(application, window._scan_worker)
     page = window._pages["AI Organizer"]
     wait_plan(application, page)
+    scan_log = json.loads(window._latest_scan.log_path.read_text(encoding="utf-8"))
+    assert scan_log["scan_root"] == str(folder)
+    assert scan_log["files_found"] == 2 and scan_log["categories"] == {"Documents": 2}
+    assert not window._pages["Dashboard"].open_scan_log.isHidden()
+    assert page.use_personal_folders.isEnabled()
+    assert page.model.rows[0].destination == folder / "Organized/Documents/a.pdf"
+    if use_personal:
+        page.use_personal_folders.click()
+        wait_plan(application, page)
+        assert page.model.index(0, 1).data() == str(documents / "a.pdf")
+    destination = (documents if use_personal else folder / "Organized/Documents") / "a.pdf"
     page.model.setData(page.model.index(1, 0), Qt.Unchecked, Qt.CheckStateRole)
     prompts = []
     responses = iter([QMessageBox.No, QMessageBox.Yes, QMessageBox.Yes])
@@ -605,25 +644,65 @@ def test_apply_and_undo_through_reopened_history(application, tmp_path, monkeypa
     monkeypatch.setattr(QMessageBox, "exec", confirm)
     page.apply_button.click()
     assert not history_path.exists() and not (folder / "Organized").exists()
+    window.reduce_motion = use_personal
+    window.show()
     page.apply_button.click()
+    assert window._stack.currentWidget() is page
+    assert page.move_progress.isVisible()
+    expected_animation = QAbstractAnimation.State.Stopped if use_personal else QAbstractAnimation.State.Running
+    assert page.move_progress._sweep.state() == expected_animation
+    assert "0 / 1 processed" in page.move_status.text()
     _wait_for_worker(application, window._journal_worker)
+    assert page.move_progress.value() == 1
+    assert page.move_progress.isHidden()
+    assert page.move_progress._sweep.state() == QAbstractAnimation.State.Stopped
     if window._scan_worker is not None:
         _wait_for_worker(application, window._scan_worker)
     wait_plan(application, page)
-    assert (folder / "Organized/Documents/a.txt").read_text() == "a.txt"
-    assert (folder / "b.txt").read_text() == "b.txt"
+    assert destination.read_text() == "a.pdf"
+    assert (folder / "b.pdf").read_text() == "b.pdf"
+    logs = window._journal.log_directory
+    log = json.loads(next(logs.glob("*-organize-*.json")).read_text(encoding="utf-8"))
+    assert log["files"] == [{
+        "source": str(folder / "a.pdf"), "destination": str(destination), "status": "moved", "reason": "",
+    }]
+    from filemind.gui.log_viewer import LogViewer
+
+    history_page = window._pages["Activity History"]
+    history_page.open_logs.click()
+    viewer = history_page.findChild(LogViewer)
+    assert viewer.isVisible() and viewer.preview.isReadOnly()
+    assert (viewer.preview.viewport().graphicsEffect() is None) == use_personal
+    assert viewer.files.count() >= 2
+    organize_index = viewer.files.findText(next(logs.glob("*-organize-*.json")).name)
+    assert organize_index >= 0
+    viewer.files.setCurrentIndex(organize_index)
+    assert json.loads(viewer.preview.toPlainText()) == log
+    viewer.close()
     assert window.close()
+    monkeypatch.setattr("filemind.gui.window.standard_personal_folders", lambda: {})
     reopened = MainWindow(history_path)
+    assert not reopened._progress_bar.isHidden()
+    assert reopened._progress_bar.accessibleName() == "History check progress"
     _wait_for_worker(application, reopened._journal_worker)
+    assert reopened._progress_bar.isHidden()
     reopened._buttons["Activity History"].click()
     history = reopened._pages["Activity History"]
     assert history.selected_ids() == [history.model.rows[0]["id"]]
     assert history.button.isEnabled()
     history.button.click()
+    assert not history.undo_progress.isHidden()
+    assert "0 / 1 processed" in history.undo_status.text()
     _wait_for_worker(application, reopened._journal_worker)
+    assert history.undo_progress.isHidden()
+    assert history.undo_progress.value() == 1
     assert history.model.rows[0]["status"] == "undone"
-    assert (folder / "a.txt").read_text() == "a.txt"
+    assert (folder / "a.pdf").read_text() == "a.pdf"
+    assert not destination.exists()
+    assert documents.is_dir()
     assert not (folder / "Organized").exists()
+    log = json.loads(next(logs.glob("*-undo-*.json")).read_text(encoding="utf-8"))
+    assert log["files"][0]["status"] == "undone"
     assert all("1 selected file" in prompt for prompt in prompts)
     assert len(prompts) == 3
     assert reopened.close()

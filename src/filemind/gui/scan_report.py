@@ -19,6 +19,7 @@ from filemind.gui.components import (
 from filemind.gui.file_model import format_size
 from filemind.gui.icons import metric_icon
 from filemind.gui.inventory_graphs import InventoryGraphs
+from filemind.gui.log_viewer import LogViewer
 from filemind.gui.motion import ScanProgress, can_animate, tween
 from filemind.gui.path_model import ScanPathModel, ScanPathTree
 from filemind.gui.theme import ACTIVE, AMBER, TRACK, fixed_font
@@ -38,6 +39,8 @@ class ScanAttempt:
     discovery_issues: tuple[ScanIssue, ...] = ()
     metadata_issues: tuple[ScanIssue, ...] = ()
     error: str = ""
+    log_path: Path | None = None
+    log_error: str = ""
 
 
 class ScanArtwork(QWidget):
@@ -219,6 +222,10 @@ class DashboardPage(QWidget):
         title_row.addWidget(title)
         title_row.addWidget(self.scan_status)
         title_row.addStretch()
+        self.open_scan_log = FeedbackButton("Open scan log")
+        self.open_scan_log.clicked.connect(self._show_scan_log)
+        self.open_scan_log.hide()
+        title_row.addWidget(self.open_scan_log)
         overview.addLayout(title_row)
         self.run_details = detail_label("Choose a folder to begin a read-only scan.")
         self.run_timing = QLabel()
@@ -304,6 +311,10 @@ class DashboardPage(QWidget):
         if item.data(0, Qt.ItemDataRole.UserRole):
             self.category_requested.emit(item.text(0))
 
+    def _show_scan_log(self):
+        if self._attempt is not None and self._attempt.log_path is not None:
+            LogViewer(self, "Scan log", [self._attempt.log_path]).open()
+
     @staticmethod
     def _tree(headings, name):
         table = QTreeWidget()
@@ -336,8 +347,10 @@ class DashboardPage(QWidget):
                        f"   ·   {attempt.elapsed:.1f} s elapsed")
         self.run_timing.setText(timing)
         self.run_timing.show()
-        self.run_error.setText(attempt.error)
-        self.run_error.setVisible(bool(attempt.error))
+        errors = "\n".join(filter(None, (attempt.error, attempt.log_error)))
+        self.run_error.setText(errors)
+        self.run_error.setVisible(bool(errors))
+        self.open_scan_log.setVisible(attempt.log_path is not None)
         self._metrics["Files found"].setText(f"{attempt.discovered:,}")
         self._metrics["Folders visited"].setText(f"{attempt.folders:,}")
         warning_count = len(attempt.discovery_issues) + len(attempt.metadata_issues)

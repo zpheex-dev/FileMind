@@ -87,6 +87,19 @@ def test_correct_location_produces_no_move(tmp_path):
     assert propose_organization(tmp_path, classified_scan(tmp_path)) == ()
 
 
+def test_protected_scan_root_cannot_propose_personal_moves(tmp_path):
+    protected = tmp_path / ".system"
+    documents = tmp_path / "Documents"
+    protected.mkdir()
+    documents.mkdir()
+    (protected / "report.pdf").write_text("example")
+    plan = propose_organization(protected, classified_scan(protected),
+                                personal_folders={"Documents": documents})
+    assert plan[0].has_conflict
+    assert not plan[0].personal_folder
+    assert not (documents / "report.pdf").exists()
+
+
 def test_category_folder_blocked_by_file(tmp_path):
     (tmp_path / "Organized").write_text("blocking file")
     (tmp_path / "report.txt").write_text("incoming")
@@ -131,7 +144,11 @@ def test_ordered_rules_and_renamed_nested_undo(tmp_path):
     rule = dict(name="Invoices", extension="TXT", pattern="inv*.txt", age_days="0",
                 size_bytes="4", source="mail", destination="Documents/Invoices/<year>")
     rules = [rule, dict(name="Other", destination="Second")]
-    plan = propose_organization(root, files, rules=rules, filenames={source: "paid.txt"})
+    documents = tmp_path / "Documents"
+    documents.mkdir()
+    plan = propose_organization(root, files, rules=rules, filenames={source: "paid.txt"},
+                                personal_folders={files[0].classification.category: documents})
+    assert not plan[0].personal_folder
     dest = root / "Organized" / "Documents" / "Invoices" / str(record.modified_at.year) / "paid.txt"
     assert plan[0].destination == dest and "Invoices" in plan[0].reason
     journal = MoveJournal(tmp_path / "journal.db")

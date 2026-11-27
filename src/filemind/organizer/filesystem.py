@@ -56,6 +56,8 @@ def parent_handle(path, home, create_from=None, on_create=None):
                 stack.callback(handle.Close)
                 info = directory.lstat()
                 _personal(info)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise NotADirectoryError(directory)
                 return info
             pin(home)
             for part in parts:
@@ -128,6 +130,15 @@ def _entry(parent, name):
     if os.name == "nt":
         return (parent / name).lstat()
     return os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+
+def directory_volume(path, home):
+    with parent_handle(path, home) as parent:
+        return _parent_volume(parent)
+
+
+def _parent_volume(parent):
+    return parent.stat().st_dev if os.name == "nt" else os.fstat(parent).st_dev
 
 
 def directory_identity(info):
@@ -208,17 +219,19 @@ def rename_new(source, name, destination, target):
         raise OSError("Safe moves are supported on Linux and Windows")
 
 
-def move(root, home, original, organized, expected, checksum, undo=False, on_create=None):
+def move(root, home, original, organized, expected, checksum, undo=False, on_create=None,
+         *, personal_folder=False):
     personal_parts(root, home)
-    for path in (original, organized):
-        personal_parts(path, home)
-        if not path.is_relative_to(root):
-            raise PermissionError("Path outside scanned folder")
-    folders = organized.parent.relative_to(root / "Organized").parts
-    if not folders:
-        raise ValueError("Invalid proposed destination")
-    for part in folders:
-        validate_folder(part)
+    personal_parts(original, home)
+    personal_parts(organized, home)
+    if not original.is_relative_to(root):
+        raise PermissionError("Path outside scanned folder")
+    if not personal_folder:
+        folders = organized.parent.relative_to(root / "Organized").parts
+        if not folders:
+            raise ValueError("Invalid proposed destination")
+        for part in folders:
+            validate_folder(part)
     if organized.name != original.name:
         validate_folder(organized.name)
     source, dest = (organized, original) if undo else (original, organized)
@@ -226,10 +239,9 @@ def move(root, home, original, organized, expected, checksum, undo=False, on_cre
         value, change_time = digest(src, source.name, expected)
         if value != checksum:
             raise ValueError("File contents have changed")
-        create_from = None if undo else root / "Organized"
+        create_from = None if undo or personal_folder else root / "Organized"
         with parent_handle(dest.parent, home, create_from, on_create) as dst:
-            volume = dst.stat().st_dev if os.name == "nt" else os.fstat(dst).st_dev
-            if volume != expected[0]:
+            if _parent_volume(dst) != expected[0]:
                 raise ValueError("Destination is on a different filesystem")
             try:
                 _entry(dst, dest.name)

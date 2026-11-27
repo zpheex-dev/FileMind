@@ -8,7 +8,15 @@ from filemind.gui.theme import ACTIVE, BORDER, TRACK
 
 
 def can_animate(widget):
-    return widget.isVisible() and not getattr(widget.window(), "reduce_motion", False)
+    if not widget.isVisible():
+        return False
+    window = widget.window()
+    while window is not None:
+        if getattr(window, "reduce_motion", False):
+            return False
+        parent = window.parentWidget()
+        window = parent.window() if parent is not None else None
+    return True
 
 
 def tween(parent, duration, easing=QEasingCurve.Type.OutCubic):

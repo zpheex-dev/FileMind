@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal, QTimer, QSettings, QUrl
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal, QTimer, QSettings, QSignalBlocker, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -34,7 +34,7 @@ from filemind.organizer.rules import validate_destination, validate_folder
 from filemind.gui.history import ActivityHistoryPage
 from filemind.gui.proposals import PlanWorker, ProposalModel
 from filemind.gui.file_model import FileTableModel, format_size as _format_size
-from filemind.gui.motion import SnapshotTransition, can_animate
+from filemind.gui.motion import ScanProgress, SnapshotTransition, can_animate
 from filemind.gui.scan_report import DashboardPage
 from filemind.gui.theme import fixed_font
 from filemind.gui.workers import PreviewWorker
@@ -49,6 +49,7 @@ from filemind.gui.components import (
 )
 from filemind.categorizer.classifier import ClassifiedFile
 from filemind.duplicate_detector.detector import DuplicateProgress, DuplicateResult
+from filemind.organizer.planner import available_personal_folders
 
 
 class MyFilesPage(QWidget):
@@ -136,6 +137,8 @@ class MyFilesPage(QWidget):
         self.file_details.setFont(fixed_font())
         self._preview_status = QLabel("Select a file")
         self._preview_status.setObjectName("SectionCaption")
+        self.preview_progress = ScanProgress(width=None)
+        self.preview_progress.setAccessibleName("File preview loading")
         self._copy = FeedbackButton("Copy path")
         self._copy.setEnabled(False)
         self._copy.clicked.connect(self._copy_path)
@@ -150,6 +153,7 @@ class MyFilesPage(QWidget):
         self._preview_card.content_layout.addLayout(actions)
         self._preview_card.content_layout.addWidget(self.file_details)
         self._preview_card.content_layout.addWidget(self._preview_status)
+        self._preview_card.content_layout.addWidget(self.preview_progress)
         self._preview_card.content_layout.addWidget(self._preview)
         self.inspector_toggle = FeedbackButton("Inspector")
         self.inspector_toggle.setCheckable(True)
@@ -184,6 +188,7 @@ class MyFilesPage(QWidget):
     def _copy_path(self):
         if self._selected_path is not None:
             QApplication.clipboard().setText(str(self._selected_path))
+            reveal(self._copy, 160)
 
     def _show_folder(self):
         path = self._selected_path
@@ -200,6 +205,7 @@ class MyFilesPage(QWidget):
         self._file_name.clear()
         self.file_details.clear()
         self._preview_status.setText("Select a file")
+        self.preview_progress.hide()
 
     def set_scan_result(
         self,
@@ -286,6 +292,7 @@ class MyFilesPage(QWidget):
             if changed_selection:
                 self._animate_file_name(row, scanned.name)
             self._preview_status.setText("PREVIEW  ·  LOADING")
+            self.preview_progress.begin()
             self._preview.clear()
             self._pending_preview = metadata.path
             self._start_preview()
@@ -301,6 +308,7 @@ class MyFilesPage(QWidget):
             status = "Skipped" if metadata.content_status == "skipped" else "Unreadable"
             text = metadata.analysis_error or "Content could not be analyzed."
         self._preview_status.setText(f"PREVIEW  ·  {status.upper()}")
+        self.preview_progress.hide()
         self._preview.setPlainText(text)
         reveal(self._preview.viewport(), 160, 0.7)
 
@@ -349,7 +357,9 @@ class MyFilesPage(QWidget):
             selected = self._model.files[current.row()].metadata.path
             if metadata is None and selected == self._preview_worker.path:
                 self._preview_status.setText("PREVIEW  ·  UNREADABLE")
+                self.preview_progress.hide()
                 self._preview.setPlainText("Preview could not be loaded.")
+                reveal(self._preview.viewport(), 160)
             elif metadata is not None and selected == metadata.path:
                 self._display_selected_file(current.row(), 0, -1, -1, metadata)
 
@@ -376,6 +386,7 @@ class MyFilesPage(QWidget):
             f"{count:,} of {len(self._analyses):,} files  ·  "
             f"{_format_size(sum(known_sizes))} known{coverage}"
         )
+        reveal(self._results_label, 150)
         if count:
             self._table.setCurrentIndex(self._model.index(0, 0))
         else:
@@ -394,11 +405,24 @@ class OrganizerPage(QWidget):
         add_card_heading(
             card.content_layout,
             "Review moves",
-            "Choose the files to move into Organized. Blocked files stay in place.",
+            "Review the destination for each file and choose which files to move.",
         )
         self._summary = QLabel("Scan a folder to generate a plan.")
         self._summary.setWordWrap(True)
         card.content_layout.addWidget(self._summary)
+        self.plan_progress = ScanProgress(width=None)
+        self.plan_progress.setAccessibleName("Checking organization destinations")
+        card.content_layout.addWidget(self.plan_progress)
+        self.personal_folders = {}
+        self._available_folders = {}
+        self.use_personal_folders = QCheckBox("Prefer existing personal folders")
+        self.use_personal_folders.setToolTip(
+            "Use your Documents, Pictures, Music, and Videos folders where available. "
+            "Other files go under Organized."
+        )
+        self.use_personal_folders.setEnabled(False)
+        self.use_personal_folders.toggled.connect(self._build_plan)
+        card.content_layout.addWidget(self.use_personal_folders)
         controls = QHBoxLayout()
         self._folder_button = FeedbackButton("Destinations…")
         self._folder_button.setEnabled(False)
@@ -463,8 +487,11 @@ class OrganizerPage(QWidget):
         controls.insertWidget(controls.count() - 1, toggle)
         card.content_layout.addWidget(self._splitter, 1)
         footer = QHBoxLayout()
-        footer.addWidget(QLabel("Changes require confirmation"))
-        footer.addStretch()
+        self.move_status = QLabel("Changes require confirmation")
+        self.move_progress = ScanProgress(width=150, height=10)
+        self.move_progress.setAccessibleName("File move progress")
+        footer.addWidget(self.move_status, 1)
+        footer.addWidget(self.move_progress)
         footer.addWidget(self.apply_button)
         card.content_layout.addLayout(footer)
         self.model.modelReset.connect(self._filter_proposals)
@@ -481,6 +508,18 @@ class OrganizerPage(QWidget):
         self._settings = QSettings("FileMind", "FolderProfiles")
         self._directory = None
         self._files = []
+
+    def begin_moves(self, total):
+        self.move_status.setText(f"Moving files  ·  0 / {total:,} processed")
+        self.move_progress.begin()
+
+    def update_move_progress(self, processed, total):
+        self.move_status.setText(f"Moving files  ·  {processed:,} / {total:,} processed")
+        self.move_progress.report(processed, total)
+
+    def end_moves(self):
+        self.move_progress.hide()
+        self.move_status.setText("Changes require confirmation")
 
     def _inspect_route(self, index=None, previous=None):
         if index is not None and index.isValid():
@@ -587,9 +626,15 @@ class OrganizerPage(QWidget):
     def set_scan_result(self, directory, files):
         if directory != self._directory:
             self.model.unchecked.clear()
+            with QSignalBlocker(self.use_personal_folders):
+                self.use_personal_folders.setChecked(False)
         self._filenames.clear()
         self.rules_button.setEnabled(True)
         self._directory, self._files = directory, files
+        self._available_folders = available_personal_folders(directory, self.personal_folders)
+        self.use_personal_folders.setEnabled(any(
+            item.classification.category in self._available_folders for item in files
+        ))
         self.model.directory = directory
         try:
             profile = json.loads(self._settings.value(self._profile_key(), "{}"))
@@ -609,8 +654,10 @@ class OrganizerPage(QWidget):
         self._excluded_count = len(self._files) - len(included)
         self.model.replace(())
         self._summary.setText("Checking destinations…")
+        self.plan_progress.begin()
+        folders = self._available_folders if self.use_personal_folders.isChecked() else {}
         worker = PlanWorker(self.generation, self._directory, included, dict(self._folder_names), self,
-                            tuple(self._rules), dict(self._filenames))
+                            tuple(self._rules), dict(self._filenames), personal_folders=folders)
         self.workers.add(worker)
         worker.ready.connect(self._accept_plan)
         worker.finished.connect(self._worker_finished)
@@ -623,11 +670,13 @@ class OrganizerPage(QWidget):
 
     def _accept_plan(self, generation, rows, error):
         if generation == self.generation:
+            self.plan_progress.hide()
             self.model.replace(rows)
             if rows:
                 self.table.setCurrentIndex(self.model.index(0, 0))
             if error:
                 self._summary.setText(error)
+            reveal(self._summary, 160)
 
 
 
@@ -658,6 +707,9 @@ class DuplicateFinderPage(QWidget):
         toolbar.addWidget(self._summary, 1)
         toolbar.addWidget(self._find_button)
         info_card.content_layout.addLayout(toolbar)
+        self.check_progress = ScanProgress(width=None)
+        self.check_progress.setAccessibleName("Duplicate check progress")
+        info_card.content_layout.addWidget(self.check_progress)
 
         self._view_stack = QStackedWidget()
         self._empty_state = EmptyState(
@@ -694,6 +746,7 @@ class DuplicateFinderPage(QWidget):
 
     def set_scan_available(self, available: bool) -> None:
         self._scan_available = available
+        self.check_progress.hide()
         self._find_button.setEnabled(available)
         self._find_button.setText("Find duplicates")
         self._issues.clear()
@@ -719,13 +772,16 @@ class DuplicateFinderPage(QWidget):
         self._find_button.setText("Cancel check")
         self._find_button.setEnabled(True)
         self._summary.setText("Hashing same-size candidates…")
+        self.check_progress.begin()
 
     def set_cancelling(self) -> None:
         self._find_button.setText("Cancelling...")
         self._find_button.setEnabled(False)
         self._summary.setText("Stopping duplicate check...")
+        self.check_progress.begin()
 
-    def set_progress(self, progress: DuplicateProgress) -> None:
+    def set_progress(self, progress: DuplicateProgress, value: int) -> None:
+        self.check_progress.report(value, 1000)
         if progress.total_files:
             self._summary.setText(
                 f"Checking candidate {progress.files_processed} of "
@@ -736,6 +792,8 @@ class DuplicateFinderPage(QWidget):
         self._find_button.setText("Check again")
         self._find_button.setEnabled(self._scan_available)
         self._summary.setText("Check cancelled; previous results were kept.")
+        self.check_progress.hide()
+        reveal(self._summary, 160)
         if self._tree.topLevelItemCount() == 0:
             self._empty_state.set_message(
                 "Duplicate check cancelled",
@@ -744,6 +802,7 @@ class DuplicateFinderPage(QWidget):
             self._view_stack.setCurrentWidget(self._empty_state)
 
     def set_result(self, result: DuplicateResult) -> None:
+        self.check_progress.hide()
         self._find_button.setText("Check again")
         self._find_button.setEnabled(self._scan_available)
         self._tree.clear()
@@ -780,6 +839,7 @@ class DuplicateFinderPage(QWidget):
             row.setToolTip(1, issue.message)
             self._issues.addTopLevelItem(row)
         self._issues.setVisible(bool(result.issues))
+        reveal(self._summary, 180)
         if result.groups:
             self._view_stack.setCurrentWidget(self._tree)
         else:
@@ -806,7 +866,7 @@ class SettingsPage(QWidget):
         layout.setSpacing(12)
 
         card = SurfaceCard()
-        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.4.0")
+        add_card_heading(card.content_layout, "FileMind", "Local desktop file organizer  ·  Version 0.5.0")
         note = QLabel("Scans and exact duplicate checks run on this device. Review moves in Organizer and restore them from History.")
         note.setWordWrap(True)
         card.content_layout.addWidget(note)

@@ -9,7 +9,7 @@ from typing import Iterable
 
 from filemind.organizer.rules import rule_matches, validate_destination, validate_folder, validate_rule
 from filemind.categorizer.classifier import ClassifiedFile
-from filemind.organizer.filesystem import FILE_ERRORS, parent_handle, personal_parts, validate
+from filemind.organizer.filesystem import FILE_ERRORS, directory_volume, parent_handle, personal_parts, validate
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class OrganizationProposal:
     destination: Path
     reason: str
     conflicts: tuple[str, ...]
+    personal_folder: bool = False
 
     @property
     def has_conflict(self) -> bool:
@@ -43,7 +44,7 @@ def _destination_conflicts(destination: Path, root: Path) -> list[str]:
         if not parent.is_relative_to(root):
             break
         try:
-            info = parent.lstat()
+            parent.lstat()
         except FileNotFoundError:
             continue
         except OSError:
@@ -55,12 +56,31 @@ def _destination_conflicts(destination: Path, root: Path) -> list[str]:
     return conflicts
 
 
+def available_personal_folders(directory, folders):
+    """Keep existing user folders on the scan root's volume."""
+    home = Path.home()
+    try:
+        volume = directory_volume(directory, home)
+    except FILE_ERRORS:
+        return {}
+    available = {}
+    for category, folder in folders.items():
+        if folder == home:
+            continue
+        try:
+            if directory_volume(folder, home) == volume:
+                available[category] = folder
+        except FILE_ERRORS:
+            continue
+    return available
+
 
 def propose_organization(
     directory: Path, files: Iterable[ClassifiedFile],
     folder_names: dict[str, str] | None = None, rules=(), filenames=None,
+    personal_folders: dict[str, Path] | None = None,
 ) -> tuple[OrganizationProposal, ...]:
-    """Suggest root/Organized/category/basename using existing rule-based classifications.
+    """Suggest category destinations using existing rule-based classifications.
 
     A proposal is a snapshot, never permission to perform a move. Both disk
     occupancy and competing proposals are reported, with no filesystem writes.
@@ -71,6 +91,7 @@ def propose_organization(
     for rule in rules:
         validate_rule(rule)
     now = datetime.now()
+    personal_folders = available_personal_folders(directory, personal_folders) if personal_folders else {}
     candidates = []
     seen = set()
     for item in files:
@@ -87,14 +108,16 @@ def propose_organization(
         validate_destination(folder)
         reason = item.classification.explanation
         conflicts = []
+        personal_folder = personal_folders.get(category)
         for rule in rules:
             if rule_matches(rule, item.metadata, source.parent.relative_to(directory).as_posix(), now):
+                personal_folder = None
                 folder = rule["destination"]
                 conditions = ", ".join(f"{key}={value}" for key, value in rule.items()
                                        if key not in ("name", "destination") and value)
                 reason = f"Rule {rule['name']} · {conditions or 'all files'}"
                 break
-        if "<year>" in folder:
+        if personal_folder is None and "<year>" in folder:
             modified = item.metadata.modified_at
             if modified is None:
                 conflicts.append("Modification year unavailable")
@@ -102,16 +125,20 @@ def propose_organization(
         name = (filenames or {}).get(source, source.name)
         if name != source.name:
             validate_folder(name)
-        destination = organized_root / folder / name
+        if personal_folder is not None:
+            if source.is_relative_to(personal_folder):
+                continue
+            reason += f" Existing personal folder: {personal_folder}"
+        destination = (personal_folder or organized_root / folder) / name
         if source_key == _path_key(destination):
             continue
-        candidates.append((source, destination, item, reason, conflicts))
+        candidates.append((source, destination, item, reason, conflicts, personal_folder))
     counts = Counter(_path_key(destination) for _, destination, *_ in candidates)
     folders_needed = {_path_key(parent) for _, dest, *_ in candidates for parent in dest.parents
                       if parent.is_relative_to(organized_root)}
     proposals = []
-    for source, destination, item, reason, conflicts in candidates:
-        conflicts.extend(_destination_conflicts(destination, organized_root))
+    for source, destination, item, reason, conflicts, personal_folder in candidates:
+        conflicts.extend(_destination_conflicts(destination, personal_folder or organized_root))
         try:
             personal_parts(source, home)
             record = item.metadata
@@ -119,16 +146,18 @@ def propose_organization(
             with parent_handle(source.parent, home) as parent:
                 validate(parent, source.name, expected)
             ancestor = destination.parent
-            while ancestor != directory and not ancestor.exists():
-                ancestor = ancestor.parent
-            with parent_handle(ancestor, home):
-                if ancestor.stat().st_dev != expected[0]:
-                    raise ValueError("Destination is on a different filesystem")
+            if personal_folder is None:
+                while ancestor != directory and not ancestor.exists():
+                    ancestor = ancestor.parent
+            if directory_volume(ancestor, home) != expected[0]:
+                raise ValueError("Destination is on a different filesystem")
         except FILE_ERRORS as error:
             conflicts.append(str(error))
         if _path_key(destination) in folders_needed or any(_path_key(parent) in counts for parent in destination.parents):
             conflicts.append("Another proposal needs this file path as a directory")
         if counts[_path_key(destination)] > 1:
             conflicts.append("Multiple files propose this destination")
-        proposals.append(OrganizationProposal(source, destination, reason, tuple(conflicts)))
+        proposals.append(OrganizationProposal(
+            source, destination, reason, tuple(conflicts), personal_folder is not None
+        ))
     return tuple(proposals)

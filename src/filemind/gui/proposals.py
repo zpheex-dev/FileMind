@@ -1,3 +1,5 @@
+import logging
+
 from PySide6.QtGui import QColor
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, Signal
 
@@ -5,19 +7,24 @@ from filemind.gui.theme import AMBER, SUCCESS
 from filemind.organizer.planner import propose_organization
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class PlanWorker(QThread):
     ready = Signal(int, object, str)
 
-    def __init__(self, generation, directory, files, folders, parent, rules=(), filenames=None):
+    def __init__(self, generation, directory, files, folders, parent, rules=(), filenames=None,
+                 *, personal_folders=None):
         super().__init__(parent)
-        self.args = directory, files, folders, rules, filenames
+        self.args = directory, files, folders, rules, filenames, personal_folders
         self.generation = generation
 
     def run(self):
         try:
             rows = propose_organization(*self.args)
-        except (OSError, ValueError) as error:
-            self.ready.emit(self.generation, (), str(error))
+        except Exception as error:
+            LOGGER.exception("Could not check organization destinations")
+            self.ready.emit(self.generation, (), str(error) or "Could not check destinations.")
         else:
             self.ready.emit(self.generation, rows, "")
 
@@ -61,7 +68,7 @@ class ProposalModel(QAbstractTableModel):
             return Qt.Unchecked if row.current_path in self.unchecked else Qt.Checked
         if role == Qt.DisplayRole and self.directory is not None and index.column() < 2:
             path = (row.current_path, row.destination)[index.column()]
-            return str(path.relative_to(self.directory))
+            return str(path.relative_to(self.directory) if path.is_relative_to(self.directory) else path)
         if index.column() == 3:
             if role == Qt.ForegroundRole:
                 return QColor(AMBER if row.has_conflict else SUCCESS)

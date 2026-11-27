@@ -1,6 +1,7 @@
 """Main application window and persistent navigation."""
 
 import logging
+from collections import Counter
 from datetime import datetime
 from time import monotonic
 from pathlib import Path
@@ -9,6 +10,7 @@ from PySide6.QtCore import QRectF, Qt, QSize, QSettings, QStandardPaths
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from filemind.activity_log import write_action_log
 from filemind.analyzer.metadata import FileMetadata
 from filemind.gui.theme import fixed_font
 from filemind.gui.components import FeedbackButton, StatusBadge
@@ -47,6 +50,21 @@ from filemind.gui.workers import DirectoryScanWorker, DuplicateScanWorker
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def standard_personal_folders():
+    locations = {
+        "Documents": QStandardPaths.DocumentsLocation,
+        "Images": QStandardPaths.PicturesLocation,
+        "Audio": QStandardPaths.MusicLocation,
+        "Video": QStandardPaths.MoviesLocation,
+    }
+    folders = {}
+    for category, location in locations.items():
+        path = QStandardPaths.writableLocation(location)
+        if path:
+            folders[category] = Path(path)
+    return folders
 
 
 PAGE_LABELS = {
@@ -105,7 +123,8 @@ class MainWindow(QMainWindow):
         if history_path is None:
             location = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
             history_path = Path(location) / "moves.sqlite3"
-        self._journal = MoveJournal(history_path)
+        self._personal_folders = standard_personal_folders()
+        self._journal = MoveJournal(history_path, self._personal_folders.values())
         self._journal_worker = None
         root_layout.addWidget(self._build_header())
         body = QHBoxLayout()
@@ -198,8 +217,12 @@ class MainWindow(QMainWindow):
         motion = self._pages["Settings"].reduce_motion
         motion.setChecked(self.reduce_motion)
         motion.toggled.connect(self._set_reduce_motion)
-        self._pages["AI Organizer"].apply_requested.connect(self._apply_moves)
-        self._pages["Activity History"].undo_requested.connect(self._undo_moves)
+        organizer = self._pages["AI Organizer"]
+        organizer.personal_folders = self._personal_folders
+        organizer.apply_requested.connect(self._apply_moves)
+        history = self._pages["Activity History"]
+        history.undo_requested.connect(self._undo_moves)
+        history.open_logs.clicked.connect(lambda: history.show_logs(self._journal.log_directory))
         page_layout.addWidget(self._stack)
         scroll_area.setWidget(page_container)
         layout.addWidget(scroll_area, 1)
@@ -294,6 +317,8 @@ class MainWindow(QMainWindow):
         if enabled:
             for transition in self.findChildren(SnapshotTransition):
                 transition.clear()
+            for effect in self.findChildren(QGraphicsOpacityEffect):
+                effect.setEnabled(False)
             self._status_badge.update()
 
     def _confirm_moves(self, verb, count, details):
@@ -333,6 +358,19 @@ class MainWindow(QMainWindow):
             return
         worker = JournalWorker(self._journal, action, args, self)
         self._journal_worker = worker
+        if action == "apply":
+            organizer = self._pages["AI Organizer"]
+            self._show_page("AI Organizer")
+            organizer.begin_moves(len(args[1]))
+            worker.progress.connect(organizer.update_move_progress)
+        elif action == "undo":
+            history = self._pages["Activity History"]
+            self._show_page("Activity History")
+            history.begin_undo(len(args[0]))
+            worker.progress.connect(history.update_undo_progress)
+        else:
+            self._progress_bar.setAccessibleName("History check progress")
+            self._progress_bar.begin()
         self.centralWidget().setEnabled(False)
         self._set_status("CHECKING HISTORY" if action == "reconcile" else "PROCESSING MOVES", muted=True)
         worker.finished.connect(self._journal_finished)
@@ -341,9 +379,15 @@ class MainWindow(QMainWindow):
     def _journal_finished(self):
         worker = self._journal_worker
         self._journal_worker = None
+        history = self._pages["Activity History"]
+        if worker.action == "apply":
+            self._pages["AI Organizer"].end_moves()
+        elif worker.action == "undo":
+            history.end_undo()
+        else:
+            self._progress_bar.hide()
         self.centralWidget().setEnabled(True)
         self._set_status("LOCAL ONLY", muted=False)
-        history = self._pages["Activity History"]
         if worker.action != "reconcile":
             self._show_page("Activity History")
         if worker.error:
@@ -352,6 +396,8 @@ class MainWindow(QMainWindow):
             history.show_rows(worker.rows, worker.batch,
                               worker.args[0] if worker.action == "undo" else ())
         if worker.action != "reconcile":
+            if self._journal.log_error:
+                QMessageBox.warning(self, "Activity logs", self._journal.log_error)
             directory = self._pages["AI Organizer"]._directory
             if directory is not None:
                 self._start_scan(directory)
@@ -450,7 +496,7 @@ class MainWindow(QMainWindow):
     def _start_scan(self, directory: Path) -> None:
         if self._duplicate_worker or self._scan_worker or self._journal_worker:
             return
-        self._latest_scan = ScanAttempt(directory, datetime.now())
+        self._latest_scan = ScanAttempt(directory, datetime.now().astimezone())
         self._scan_started = monotonic()
         self._show_root()
         self._rescan_button.setEnabled(False)
@@ -467,6 +513,7 @@ class MainWindow(QMainWindow):
         self._pages["Activity History"].setEnabled(False)
         self._scan_button.setText("Cancel scan")
         self._scan_button.setEnabled(True)
+        self._progress_bar.setAccessibleName("Workspace scan progress")
         self._progress_bar.begin()
         self._set_status("SCANNING", muted=False)
 
@@ -495,11 +542,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(progress)
         self._pages["Dashboard"].show_attempt(attempt)
 
-    def _finish_scan_attempt(self, status, error=""):
+    def _finish_scan_attempt(self, status, error="", files=()):
         attempt = self._latest_scan
         attempt.status = status
         attempt.error = error
-        attempt.finished = datetime.now()
+        attempt.finished = datetime.now().astimezone()
         attempt.elapsed = monotonic() - self._scan_started
         result = self._scan_worker.result
         if result is not None:
@@ -508,6 +555,25 @@ class MainWindow(QMainWindow):
             attempt.discovery_issues = result.issues
         attempt.processed = self._scan_worker.metadata_processed
         attempt.metadata_issues = tuple(self._scan_worker.metadata_issues)
+        warnings = [
+            {"stage": stage, "path": str(issue.path), "reason": issue.message}
+            for stage, issues in (("discovery", attempt.discovery_issues),
+                                  ("metadata", attempt.metadata_issues))
+            for issue in issues
+        ]
+        try:
+            attempt.log_path = write_action_log(
+                self._journal.log_directory, "scan", scan_root=str(attempt.root),
+                status=status, started_at=attempt.started.isoformat(),
+                finished_at=attempt.finished.isoformat(), elapsed_seconds=round(attempt.elapsed, 3),
+                folders_visited=attempt.folders, files_found=attempt.discovered,
+                files_processed=attempt.processed,
+                categories=dict(Counter(item.classification.category for item in files)),
+                warnings=warnings, error=error,
+            )
+        except OSError as log_error:
+            attempt.log_error = f"Could not save the scan log: {log_error}"
+            LOGGER.warning("%s", attempt.log_error)
         self._pages["Dashboard"].show_attempt(attempt)
         return attempt
 
@@ -518,7 +584,9 @@ class MainWindow(QMainWindow):
         issues: tuple[ScanIssue, ...],
     ) -> None:
         warnings = len(issues) + len(self._scan_worker.metadata_issues)
-        attempt = self._finish_scan_attempt("Completed with warnings" if warnings else "Completed")
+        attempt = self._finish_scan_attempt(
+            "Completed with warnings" if warnings else "Completed", files=files
+        )
         dashboard = self._pages["Dashboard"]
         dashboard.set_scan_result(directory, files, attempt.folders, attempt.finished, warnings)
         self._inventory_issues = issues
@@ -556,6 +624,7 @@ class MainWindow(QMainWindow):
                 duplicate_page = self._pages["Duplicate Finder"]
                 if isinstance(duplicate_page, DuplicateFinderPage):
                     duplicate_page.set_cancelling()
+                self._progress_bar.begin()
                 self._set_status("CANCELLING", muted=True)
             return
         self._start_duplicate_check()
@@ -577,7 +646,8 @@ class MainWindow(QMainWindow):
         self._rescan_button.setEnabled(False)
         self._pages["AI Organizer"].setEnabled(False)
         self._pages["Activity History"].setEnabled(False)
-        self._progress_bar.begin(1000)
+        self._progress_bar.setAccessibleName("Workspace duplicate check progress")
+        self._progress_bar.begin()
         self._set_status("HASHING", muted=True)
 
         duplicate_page = self._pages["Duplicate Finder"]
@@ -587,15 +657,17 @@ class MainWindow(QMainWindow):
 
     def _on_duplicate_progress(self, progress: DuplicateProgress) -> None:
         duplicate_page = self._pages["Duplicate Finder"]
-        if isinstance(duplicate_page, DuplicateFinderPage):
-            duplicate_page.set_progress(progress)
+        if self._duplicate_worker is None or not duplicate_page._find_button.isEnabled():
+            return
         if progress.total_bytes:
             value = int(progress.bytes_hashed * 1000 / progress.total_bytes)
         elif progress.total_files:
             value = int(progress.files_processed * 1000 / progress.total_files)
         else:
-            value = 0
-        self._progress_bar.report(min(value, 1000), 1000)
+            return
+        value = min(value, 1000)
+        duplicate_page.set_progress(progress, value)
+        self._progress_bar.report(value, 1000)
         self._set_status("HASHING", muted=True)
 
     def _on_duplicate_completed(self, result: DuplicateResult) -> None:
@@ -631,6 +703,7 @@ class MainWindow(QMainWindow):
         self._pages["Activity History"].setEnabled(True)
         self._duplicate_worker = None
         self._pages["My Files"].tools_button.setEnabled(self._has_scan)
+        self._pages["Duplicate Finder"].check_progress.hide()
         self._scan_button.setEnabled(True)
         self._rescan_button.setEnabled(self._latest_scan is not None)
         self._progress_bar.hide()

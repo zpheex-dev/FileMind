@@ -1,28 +1,44 @@
 """Activity History table and background journal operations."""
 
 from collections import Counter
+from time import monotonic
 
 from filemind.gui.components import FeedbackButton, SurfaceCard, add_card_heading, detail_label, reveal
+from filemind.gui.log_viewer import LogViewer
+from filemind.gui.motion import ScanProgress
 from filemind.gui.theme import SUCCESS, AMBER
 from PySide6.QtGui import QColor
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QAbstractTableModel, QModelIndex, Qt, QThread, Signal
-from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel, QMessageBox, QTableView, QVBoxLayout, QWidget
 
 
 class JournalWorker(QThread):
+    progress = Signal(int, int)
+
     def __init__(self, journal, action, args, parent):
         super().__init__(parent)
         self.journal, self.action, self.args = journal, action, args
         self.batch = None
         self.error = ""
         self.rows = []
+        self._last_progress = 0.0
 
     def run(self):
         try:
-            self.batch = getattr(self.journal, self.action)(*self.args)
+            operation = getattr(self.journal, self.action)
+            if self.action in ("apply", "undo"):
+                self.batch = operation(*self.args, on_progress=self._report_progress)
+            else:
+                self.batch = operation(*self.args)
             self.rows = self.journal.history()
         except Exception as error:
             self.error = str(error)
+
+    def _report_progress(self, processed, total):
+        now = monotonic()
+        if processed == total or now - self._last_progress >= 0.05:
+            self._last_progress = now
+            self.progress.emit(processed, total)
 
 
 class HistoryModel(QAbstractTableModel):
@@ -89,8 +105,15 @@ class ActivityHistoryPage(QWidget):
         panel.content_layout.addWidget(self.table, 1)
         self.details = detail_label("Select an operation to inspect the paths and outcome.")
         panel.content_layout.addWidget(self.details)
+        self.undo_progress = ScanProgress(width=None)
+        self.undo_progress.setAccessibleName("Undo progress")
+        panel.content_layout.addWidget(self.undo_progress)
         footer = QHBoxLayout()
-        footer.addWidget(QLabel("Select completed copies or moves to undo"), 1)
+        self.undo_status = QLabel("Undo restores files to their recorded paths")
+        self.undo_status.setWordWrap(True)
+        footer.addWidget(self.undo_status, 1)
+        self.open_logs = FeedbackButton("Open activity logs")
+        footer.addWidget(self.open_logs)
         self.button = FeedbackButton("Undo selected operations")
         self.button.setEnabled(False)
         self.table.selectionModel().selectionChanged.connect(self._update_button)
@@ -99,6 +122,29 @@ class ActivityHistoryPage(QWidget):
         self.button.setObjectName("ReviewButton")
         footer.addWidget(self.button)
         panel.content_layout.addLayout(footer)
+
+    def begin_undo(self, total):
+        self.undo_status.setText(f"Undoing operations  ·  0 / {total:,} processed")
+        self.undo_progress.begin()
+
+    def update_undo_progress(self, processed, total):
+        self.undo_status.setText(f"Undoing operations  ·  {processed:,} / {total:,} processed")
+        self.undo_progress.report(processed, total)
+
+    def end_undo(self):
+        self.undo_progress.hide()
+        self.undo_status.setText("Undo restores files to their recorded paths")
+
+    def show_logs(self, directory):
+        try:
+            files = sorted((path for path in directory.iterdir()
+                            if path.suffix == ".json" and path.is_file()), reverse=True)
+        except FileNotFoundError:
+            files = []
+        except OSError as error:
+            QMessageBox.warning(self, "Activity logs", f"Could not list the saved logs.\n{error}")
+            return
+        LogViewer(self, "Activity logs", files).open()
 
     def _show_details(self, current, _previous=None):
         if not current.isValid():

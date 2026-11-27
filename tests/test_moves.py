@@ -1,4 +1,7 @@
+import json
 import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -59,6 +62,11 @@ def test_selection_partial_failure_and_reopened_undo(workspace):
     assert second.destination.read_text() == "taken"
     assert unchecked.current_path.exists() and not unchecked.destination.exists()
     assert first.destination.read_text() == "a.txt" and not first.current_path.exists()
+    log = json.loads(next(journal.log_directory.glob("*-organize-*.json")).read_text(encoding="utf-8"))
+    assert log["scan_root"] == str(root)
+    assert log["outcomes"] == {"moved": 1, "skipped": 1}
+    assert log["files"][0]["source"] == str(second.current_path)
+    assert log["files"][0]["reason"]
     reopened = MoveJournal(journal.database)
     reopened.reconcile()
     moved, skipped = reopened.history()
@@ -68,9 +76,13 @@ def test_selection_partial_failure_and_reopened_undo(workspace):
     assert reopened.history()[0]["status"] == "undone"
 
 
-def test_undo_removes_created_folders_after_last_file(workspace):
+@pytest.mark.parametrize("legacy_journal", [False, True])
+def test_undo_removes_created_folders_after_last_file(workspace, legacy_journal):
     journal, root, proposals, metadata = workspace
     journal.apply(root, proposals[:2], metadata)
+    if legacy_journal:
+        with closing(sqlite3.connect(journal.database)) as db, db:
+            db.execute("ALTER TABLE moves DROP COLUMN personal_folder")
     reopened = MoveJournal(journal.database)
     first, last = [row["id"] for row in reopened.history()]
     reopened.undo([first])
@@ -174,7 +186,9 @@ def test_collision_at_rename_and_stale_source(workspace, monkeypatch):
         real(*args)
     second.current_path.unlink()
     monkeypatch.setattr(filesystem, "rename_new", occupy)
-    journal.apply(root, rows[:2], metadata)
+    progress = []
+    journal.apply(root, rows[:2], metadata, on_progress=lambda done, total: progress.append((done, total)))
+    assert progress == [(1, 2), (2, 2)]
     assert all(row["status"] == "skipped" and row["reason"] for row in journal.history())
     assert first.current_path.read_text() == "a.txt"
     assert first.destination.read_text() == "late arrival"
@@ -205,6 +219,39 @@ def test_symlink_destination_cannot_redirect_moves(workspace):
     journal.apply(root, rows[:1], metadata)
     assert journal.history()[0]["status"] == "skipped"
     assert not (root.parent / "Documents").exists()
+
+
+@pytest.mark.parametrize("change", ["missing", "symlink", "unapproved"])
+def test_personal_destination_rechecked_before_move(workspace, change):
+    journal, root, _, metadata = workspace
+    documents = root.parent / "Documents"
+    documents.mkdir()
+    plan = propose_organization(root, [classified(next(iter(metadata)))],
+                                personal_folders={"Documents": documents})
+    assert plan[0].destination.parent == documents and not plan[0].has_conflict
+    if change != "unapproved":
+        journal = MoveJournal(journal.database, [documents])
+        documents.rmdir()
+    if change == "symlink":
+        try:
+            documents.symlink_to(root, target_is_directory=True)
+        except OSError:
+            pytest.skip("Directory symlinks are unavailable")
+    journal.apply(root, plan, metadata)
+    assert journal.history()[0]["status"] == "skipped"
+    assert plan[0].current_path.read_text() == "a.txt"
+    assert not (root / "Organized").exists()
+    if change == "missing":
+        assert not documents.exists()
+
+
+def test_log_write_failure_preserves_move(workspace):
+    journal, root, rows, metadata = workspace
+    journal.log_directory.write_text("Occupied")
+    journal.apply(root, rows[:1], metadata)
+    assert journal.log_error
+    assert journal.history()[0]["status"] == "moved"
+    assert rows[0].destination.read_text() == "a.txt"
 
 
 def test_different_volume_refusal_preserves_source(workspace, monkeypatch):

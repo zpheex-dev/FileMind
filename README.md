@@ -93,7 +93,7 @@ visible. It never deletes or changes files.
 The Organizer suggests destinations from the latest scan. You can apply checked moves
 after confirmation and undo them from Activity History, including after restarting FileMind.
 
-Scanning and analysis are read-only. Directory scans collect metadata without
+Scanning and analysis leave the selected folder untouched. Scans collect metadata without
 extracting every document. The file inventory uses a virtual table model,
 search is debounced, and only eight extracted previews are cached in memory. Text extraction supports TXT, Markdown,
 Python, CSV, JSON, and log files, plus PDFs through PyMuPDF. Extraction is bounded
@@ -160,7 +160,11 @@ is cancelled. After a successful scan, open **Duplicate Finder** and choose
 replaces the duplicate check's source list; cancelling a duplicate check keeps
 the previous complete results.
 
-Open **Organizer** to review **Proposed Organization**. Without a matching saved rule, each file goes to its category folder under `Organized` with its original filename.
+Open **Organizer** to review **Proposed Organization**. By default, files keep
+their names and go to category folders under `Organized`. Turn on **Prefer
+existing personal folders** to use an existing Documents, Pictures, Music, or
+Videos folder on the same filesystem when no saved rule matches. A matching
+rule still uses its configured destination under `Organized`.
 Files already at their destination are omitted. Existing destinations and multiple
 files targeting the same destination are flagged. Unknown extensions go to **Other**.
 A completed scan replaces the plan, including an empty scan; cancelled or failed
@@ -169,8 +173,8 @@ Previewing a plan leaves files untouched. To try moving files:
 
 1. Scan a personal folder containing a few test files. Open **Organizer**,
    review destinations and uncheck anything you want to keep in place.
-2. Click **Review moves** and confirm the count. FileMind creates the
-   required folders under `Organized` and checks each file again before moving it.
+2. Click **Review moves** and confirm the count. FileMind checks each file again
+   before moving it and creates category folders only for `Organized` destinations.
 3. In **History**, inspect both paths, the status and any skip reason.
    Select moved rows, click **Undo selected operations** and confirm. You can also
    do this after restarting FileMind. Undo removes empty destination folders
@@ -183,6 +187,13 @@ SHA-256 digest. If either path conflicts, Activity History explains the reason.
 FileMind stores the journal in `moves.sqlite3` in its per-user application data
 directory. On startup it checks interrupted operations against both paths and
 marks ambiguous results for review without changing files.
+
+The desktop app writes a timestamped JSON log for each scan attempt, confirmed
+organize batch, and Undo operation. Scan logs include the folder, timing, file
+counts, categories, and warnings. Move logs include the source, destination,
+and outcome for each attempted file. Use **Open scan log** in Overview or
+**Open activity logs** in History & undo. Logs are stored locally in the
+`logs` folder beside the move journal.
 
 ## Standalone executables
 
